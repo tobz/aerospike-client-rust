@@ -23,6 +23,7 @@ use aerospike::{Bins, ReadPolicy, WritePolicy};
 
 use bencher::Bencher;
 use aerospike::{as_bin, as_key};
+use tokio::runtime;
 
 #[path = "../tests/common/mod.rs"]
 mod common;
@@ -31,34 +32,49 @@ lazy_static! {
     static ref TEST_SET: String = common::rand_str(10);
 }
 
+fn get_runtime() -> runtime::Runtime {
+    runtime::Builder::new()
+        .basic_scheduler()
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
 fn single_key_read(bench: &mut Bencher) {
-    let client = common::client();
+    let mut rt = get_runtime();
+    let client = rt.block_on(async { common::client().await }).unwrap();
     let namespace = common::namespace();
     let key = as_key!(namespace, &TEST_SET, common::rand_str(10));
     let wbin = as_bin!("i", 1);
     let bins = vec![&wbin];
     let rpolicy = ReadPolicy::default();
     let wpolicy = WritePolicy::default();
-    client.put(&wpolicy, &key, &bins).unwrap();
+    rt.block_on(async { client.put(&wpolicy, &key, &bins).await }).unwrap();
 
-    bench.iter(|| client.get(&rpolicy, &key, Bins::All).unwrap());
+    bench.iter(|| {
+        rt.block_on(async { client.get(&rpolicy, &key, Bins::All).await }).unwrap();
+    });
 }
 
 fn single_key_read_header(bench: &mut Bencher) {
-    let client = common::client();
+    let mut rt = get_runtime();
+    let client = rt.block_on(async { common::client().await }).unwrap();
     let namespace = common::namespace();
     let key = as_key!(namespace, &TEST_SET, common::rand_str(10));
     let wbin = as_bin!("i", 1);
     let bins = vec![&wbin];
     let rpolicy = ReadPolicy::default();
     let wpolicy = WritePolicy::default();
-    client.put(&wpolicy, &key, &bins).unwrap();
+    rt.block_on(async { client.put(&wpolicy, &key, &bins).await }).unwrap();
 
-    bench.iter(|| client.get(&rpolicy, &key, Bins::None).unwrap());
+    bench.iter(|| {
+        rt.block_on(async { client.get(&rpolicy, &key, Bins::None).await }).unwrap();
+    });
 }
 
 fn single_key_write(bench: &mut Bencher) {
-    let client = common::client();
+    let mut rt = get_runtime();
+    let client = rt.block_on(async { common::client().await }).unwrap();
     let namespace = common::namespace();
     let key = as_key!(namespace, &TEST_SET, common::rand_str(10));
     let wpolicy = WritePolicy::default();
@@ -70,7 +86,7 @@ fn single_key_write(bench: &mut Bencher) {
     let bins = [bin1, bin2, bin3, bin4];
 
     bench.iter(|| {
-        client.put(&wpolicy, &key, &bins).unwrap();
+        rt.block_on(async { client.put(&wpolicy, &key, &bins).await }).unwrap();
     });
 }
 

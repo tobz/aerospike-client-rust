@@ -619,14 +619,16 @@ macro_rules! as_blob {
 ///
 /// ```rust
 /// # use aerospike::*;
-/// # use std::vec::Vec;
-/// # fn main() {
-/// # let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
-/// # let client = Client::new(&ClientPolicy::default(), &hosts).unwrap();
-/// # let key = as_key!("test", "test", "mykey");
+/// # #[tokio::main(max_threads = 1)]
+/// # async fn main() {
+/// let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
+/// let client = Client::new(&ClientPolicy::default(), &hosts).await
+///     .expect("failed to create client");
+/// 
+/// let key = as_key!("test", "test", "mykey");
 /// let list = as_list!("a", "b", "c");
 /// let bin = as_bin!("list", list);
-/// client.put(&WritePolicy::default(), &key, &vec![&bin]).unwrap();
+/// client.put(&WritePolicy::default(), &key, &vec![&bin]).await.unwrap();
 /// # }
 /// ```
 #[macro_export]
@@ -650,16 +652,18 @@ macro_rules! as_list {
 ///
 /// ```rust,should_panic
 /// # use aerospike::*;
-/// # use std::vec::Vec;
-/// # fn main() {
-/// # let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
-/// # let client = Client::new(&ClientPolicy::default(), &hosts).unwrap();
+/// # #[tokio::main(max_threads = 1)]
+/// # async fn main() {
+/// let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
+/// let client = Client::new(&ClientPolicy::default(), &hosts).await
+///     .expect("failed to create client");
+/// 
 /// # let key = as_key!("test", "test", "mykey");
 /// let module = "myUDF";
 /// let func = "myFunction";
 /// let args = as_values!("a", "b", "c");
 /// client.execute_udf(&WritePolicy::default(), &key,
-///     &module, &func, Some(&args)).unwrap();
+///     &module, &func, Some(&args)).await.unwrap();
 /// # }
 /// ```
 #[macro_export]
@@ -684,13 +688,17 @@ macro_rules! as_values {
 /// ```rust
 /// # use aerospike::*;
 /// # use std::collections::HashMap;
-/// # fn main() {
-/// # let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
-/// # let client = Client::new(&ClientPolicy::default(), &hosts).unwrap();
-/// # let key = as_key!("test", "test", "mykey");
+/// # #[tokio::main(max_threads = 1)]
+/// # async fn main() {
+/// let hosts = std::env::var("AEROSPIKE_HOSTS")
+///     .unwrap_or(String::from("127.0.0.1:3000"));
+/// let client = Client::new(&ClientPolicy::default(), &hosts).await
+///     .expect("failed to create client");
+/// 
+/// let key = as_key!("test", "test", "mykey");
 /// let map = as_map!("a" => 1, "b" => 2);
 /// let bin = as_bin!("map", map);
-/// client.put(&WritePolicy::default(), &key, &vec![&bin]).unwrap();
+/// client.put(&WritePolicy::default(), &key, &vec![&bin]).await.unwrap();
 /// # }
 /// ```
 #[macro_export]

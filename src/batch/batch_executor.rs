@@ -18,35 +18,32 @@ use std::cmp;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use parking_lot::Mutex;
-use scoped_pool::Pool;
+use futures::stream::{iter, StreamExt};
 
 use crate::batch::BatchRead;
 use crate::cluster::partition::Partition;
 use crate::cluster::{Cluster, Node};
 use crate::commands::BatchReadCommand;
-use crate::errors::{Error, Result};
+use crate::errors::Result;
 use crate::policy::{BatchPolicy, Concurrency};
 use crate::Key;
 
 pub struct BatchExecutor {
     cluster: Arc<Cluster>,
-    thread_pool: Pool,
 }
 
 impl BatchExecutor {
-    pub fn new(cluster: Arc<Cluster>, thread_pool: Pool) -> Self {
+    pub fn new(cluster: Arc<Cluster>) -> Self {
         BatchExecutor {
             cluster,
-            thread_pool,
         }
     }
 
-    pub fn execute_batch_read<'a>(
+    pub async fn execute_batch_read(
         &self,
         policy: &BatchPolicy,
-        batch_reads: Vec<BatchRead<'a>>,
-    ) -> Result<Vec<BatchRead<'a>>> {
+        batch_reads: Vec<BatchRead>,
+    ) -> Result<Vec<BatchRead>> {
         let mut batch_nodes = self.get_batch_nodes(&batch_reads)?;
         let batch_reads = SharedSlice::new(batch_reads);
         let jobs = batch_nodes
@@ -55,46 +52,39 @@ impl BatchExecutor {
                 BatchReadCommand::new(policy, node, batch_reads.clone(), offsets)
             })
             .collect();
-        self.execute_batch_jobs(jobs, &policy.concurrency)?;
+        self.execute_batch_jobs(jobs, &policy.concurrency).await?;
         batch_reads.into_inner()
     }
 
-    fn execute_batch_jobs(
+    async fn execute_batch_jobs(
         &self,
-        mut jobs: Vec<BatchReadCommand>,
+        jobs: Vec<BatchReadCommand>,
         concurrency: &Concurrency,
     ) -> Result<()> {
-        let threads = match *concurrency {
+        let max_in_flight = match *concurrency {
             Concurrency::Sequential => 1,
             Concurrency::Parallel => jobs.len(),
             Concurrency::MaxThreads(max) => cmp::min(max, jobs.len()),
         };
-        let jobs = Arc::new(Mutex::new(jobs.iter_mut()));
-        let last_err: Arc<Mutex<Option<Error>>> = Arc::default();
-        self.thread_pool.scoped(|scope| {
-            for _ in 0..threads {
-                let last_err = last_err.clone();
-                let jobs = jobs.clone();
-                scope.execute(move || {
-                    let next_job = || jobs.lock().next();
-                    while let Some(cmd) = next_job() {
-                        if let Err(err) = cmd.execute() {
-                            *last_err.lock() = Some(err);
-                            jobs.lock().all(|_| true); // consume the remaining jobs
-                        };
-                    }
-                });
-            }
-        });
-        match Arc::try_unwrap(last_err).unwrap().into_inner() {
-            None => Ok(()),
-            Some(err) => Err(err),
-        }
+
+        // this is not true thread-level concurrency, just concurrency of in-flight futures...
+        iter(jobs)
+            .map(|mut job| {
+                tokio::spawn(async move { job.execute().await })
+            })
+            .buffer_unordered(max_in_flight)
+            .fold(Ok(()), |last_result, result| async {
+                match result {
+                    Ok(Ok(())) => last_result,
+                    Ok(Err(e)) => Err(e),
+                    Err(e) => Err(e.into()),
+                }
+            }).await
     }
 
-    fn get_batch_nodes<'a>(
+    fn get_batch_nodes(
         &self,
-        batch_reads: &[BatchRead<'a>],
+        batch_reads: &[BatchRead],
     ) -> Result<HashMap<Arc<Node>, Vec<usize>>> {
         let mut map = HashMap::new();
         for (idx, batch_read) in batch_reads.iter().enumerate() {

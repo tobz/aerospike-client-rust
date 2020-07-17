@@ -15,19 +15,24 @@
 
 use std::boxed::Box;
 use std::str::FromStr;
-use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rand::prelude::*;
 
+use log::trace;
+
 use aerospike::Error as asError;
 use aerospike::Result as asResult;
-use aerospike::{Client, ErrorKind, Key, ReadPolicy, ResultCode, WritePolicy};
+use aerospike::{Client, ErrorKind, Key, ReadPolicy, ResultCode, WritePolicy, as_bin};
 
-use generator::KeyRange;
-use percent::Percent;
-use stats::Histogram;
+use async_trait::async_trait;
+use lazy_static::lazy_static;
+use tokio::sync::mpsc::UnboundedSender;
+
+use crate::generator::KeyRange;
+use crate::percent::Percent;
+use crate::stats::Histogram;
 
 lazy_static! {
     // How frequently workers send stats to the collector
@@ -61,7 +66,7 @@ impl FromStr for Workload {
 
 pub struct Worker {
     histogram: Histogram,
-    collector: Sender<Histogram>,
+    collector: UnboundedSender<Histogram>,
     task: Box<dyn Task>,
 }
 
@@ -69,7 +74,7 @@ impl Worker {
     pub fn for_workload(
         workload: &Workload,
         client: Arc<Client>,
-        sender: Sender<Histogram>,
+        collector: UnboundedSender<Histogram>,
     ) -> Self {
         let task: Box<dyn Task> = match *workload {
             Workload::Initialize => Box::new(InsertTask::new(client)),
@@ -77,26 +82,26 @@ impl Worker {
         };
         Worker {
             histogram: Histogram::new(),
-            collector: sender,
-            task: task,
+            collector,
+            task,
         }
     }
 
-    pub fn run(&mut self, key_range: KeyRange) {
+    pub async fn run(&mut self, key_range: KeyRange) {
         let mut last_collection = Instant::now();
         for key in key_range {
             let now = Instant::now();
-            let status = self.task.execute(&key);
+            let status = self.task.execute(&key).await;
             self.histogram.add(now.elapsed(), status);
             if last_collection.elapsed() > *COLLECT_MS {
-                self.collect();
+                self.collect().await;
                 last_collection = Instant::now();
             }
         }
-        self.collect();
+        self.collect().await;
     }
 
-    fn collect(&mut self) {
+    async fn collect(&mut self) {
         self.collector.send(self.histogram).unwrap();
         self.histogram.reset();
     }
@@ -108,8 +113,9 @@ pub enum Status {
     Timeout,
 }
 
-trait Task: Send {
-    fn execute(&self, key: &Key) -> Status;
+#[async_trait]
+trait Task: Send + Sync {
+    async fn execute(&self, key: &Key) -> Status;
 
     fn status(&self, result: asResult<()>) -> Status {
         match result {
@@ -134,11 +140,12 @@ impl InsertTask {
     }
 }
 
+#[async_trait]
 impl Task for InsertTask {
-    fn execute(&self, key: &Key) -> Status {
+    async fn execute(&self, key: &Key) -> Status {
         let bin = as_bin!("int", random::<i64>());
         trace!("Inserting {}", key);
-        self.status(self.client.put(&self.policy, key, &[&bin]))
+        self.status(self.client.put(&self.policy, key, &[&bin]).await)
     }
 }
 
@@ -152,23 +159,24 @@ pub struct ReadUpdateTask {
 impl ReadUpdateTask {
     pub fn new(client: Arc<Client>, reads: Percent) -> Self {
         ReadUpdateTask {
-            client: client,
+            client,
             rpolicy: ReadPolicy::default(),
             wpolicy: WritePolicy::default(),
-            reads: reads,
+            reads,
         }
     }
 }
 
+#[async_trait]
 impl Task for ReadUpdateTask {
-    fn execute(&self, key: &Key) -> Status {
+    async fn execute(&self, key: &Key) -> Status {
         if self.reads >= random() {
             trace!("Reading {}", key);
-            self.status(self.client.get(&self.rpolicy, key, ["int"]).map(|_| ()))
+            self.status(self.client.get(&self.rpolicy, key, ["int"]).await.map(|_| ()))
         } else {
             trace!("Writing {}", key);
             let bin = as_bin!("int", random::<i64>());
-            self.status(self.client.put(&self.wpolicy, key, &[&bin]))
+            self.status(self.client.put(&self.wpolicy, key, &[&bin]).await)
         }
     }
 }

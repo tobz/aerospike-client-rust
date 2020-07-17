@@ -17,6 +17,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
+use error_chain::bail;
+use tracing::warn;
+
 use crate::cluster::{Cluster, Node};
 use crate::commands::buffer;
 use crate::commands::{Command, SingleCommand};
@@ -43,8 +47,8 @@ impl<'a> ReadCommand<'a> {
         }
     }
 
-    pub fn execute(&mut self) -> Result<()> {
-        SingleCommand::execute(self.policy, self)
+    pub async fn execute(&mut self) -> Result<()> {
+        SingleCommand::execute(self.policy, self).await
     }
 
     fn parse_record(
@@ -95,14 +99,15 @@ impl<'a> ReadCommand<'a> {
     }
 }
 
+#[async_trait]
 impl<'a> Command for ReadCommand<'a> {
     fn write_timeout(&mut self, conn: &mut Connection, timeout: Option<Duration>) -> Result<()> {
         conn.buffer.write_timeout(timeout);
         Ok(())
     }
 
-    fn write_buffer(&mut self, conn: &mut Connection) -> Result<()> {
-        conn.flush()
+    async fn write_buffer(&mut self, conn: &mut Connection) -> Result<()> {
+        conn.flush().await
     }
 
     fn prepare_buffer(&mut self, conn: &mut Connection) -> Result<()> {
@@ -114,8 +119,8 @@ impl<'a> Command for ReadCommand<'a> {
         self.single_command.get_node()
     }
 
-    fn parse_result(&mut self, conn: &mut Connection) -> Result<()> {
-        if let Err(err) = conn.read_buffer(buffer::MSG_TOTAL_HEADER_SIZE as usize) {
+    async fn parse_result(&mut self, conn: &mut Connection) -> Result<()> {
+        if let Err(err) = conn.read_buffer(buffer::MSG_TOTAL_HEADER_SIZE as usize).await {
             warn!("Parse result error: {}", err);
             bail!(err);
         }
@@ -132,7 +137,7 @@ impl<'a> Command for ReadCommand<'a> {
 
         // Read remaining message bytes
         if receive_size > 0 {
-            if let Err(err) = conn.read_buffer(receive_size) {
+            if let Err(err) = conn.read_buffer(receive_size).await {
                 warn!("Parse result error: {}", err);
                 bail!(err);
             }

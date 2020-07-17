@@ -16,6 +16,7 @@ use std::str;
 use std::time::Duration;
 
 use byteorder::{ByteOrder, NetworkEndian};
+use error_chain::bail;
 
 use crate::batch::batch_executor::SharedSlice;
 use crate::commands::field_type::FieldType;
@@ -271,10 +272,10 @@ impl Buffer {
     }
 
     // Writes the command for batch read operations
-    pub fn set_batch_read<'a>(
+    pub fn set_batch_read(
         &mut self,
         policy: &BatchPolicy,
-        batch_reads: SharedSlice<BatchRead<'a>>,
+        batch_reads: SharedSlice<BatchRead>,
         offsets: &[usize],
     ) -> Result<()> {
         let field_count = if policy.send_set_name { 2 } else { 1 };

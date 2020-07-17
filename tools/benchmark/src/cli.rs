@@ -17,10 +17,11 @@ use std::convert::AsRef;
 use std::env;
 use std::str::FromStr;
 
-use clap::{App, Arg};
+use clap::{App, Arg, crate_name, crate_version, crate_description};
 use num_cpus;
+use lazy_static::lazy_static;
 
-use workers::Workload;
+use crate::workers::Workload;
 
 const AFTER_HELP: &'static str = r###"
 

@@ -54,13 +54,16 @@ use crate::errors::{Error, ErrorKind, Result};
 use crate::net::Connection;
 use crate::ResultCode;
 
+use async_trait::async_trait;
+
 // Command interface describes all commands available
+#[async_trait]
 pub trait Command {
     fn write_timeout(&mut self, conn: &mut Connection, timeout: Option<Duration>) -> Result<()>;
     fn prepare_buffer(&mut self, conn: &mut Connection) -> Result<()>;
     fn get_node(&self) -> Result<Arc<Node>>;
-    fn parse_result(&mut self, conn: &mut Connection) -> Result<()>;
-    fn write_buffer(&mut self, conn: &mut Connection) -> Result<()>;
+    async fn parse_result(&mut self, conn: &mut Connection) -> Result<()>;
+    async fn write_buffer(&mut self, conn: &mut Connection) -> Result<()>;
 }
 
 pub fn keep_connection(err: &Error) -> bool {

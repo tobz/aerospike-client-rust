@@ -13,19 +13,19 @@
 // License for the specific language governing permissions and limitations under
 // the License.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::thread;
+use std::convert::identity;
 
 use crate::common;
 use env_logger;
 
-use aerospike::{Bins, ScanPolicy, WritePolicy, as_key, as_bin};
+use aerospike::{Client, Bins, ScanPolicy, WritePolicy, as_key, as_bin};
+use futures::{future::ready, stream::StreamExt};
+use tokio::stream::iter;
 
 const EXPECTED: usize = 1000;
 
-fn create_test_set(no_records: usize) -> String {
-    let client = common::client();
+async fn create_test_set(client: &Client, no_records: usize) -> String {
     let namespace = common::namespace();
     let set_name = common::rand_str(10);
 
@@ -34,8 +34,8 @@ fn create_test_set(no_records: usize) -> String {
         let key = as_key!(namespace, &set_name, i);
         let wbin = as_bin!("bin", i);
         let bins = vec![&wbin];
-        client.delete(&wpolicy, &key).unwrap();
-        client.put(&wpolicy, &key, &bins).unwrap();
+        client.delete(&wpolicy, &key).await.unwrap();
+        client.put(&wpolicy, &key, &bins).await.unwrap();
     }
 
     set_name
@@ -45,80 +45,51 @@ fn create_test_set(no_records: usize) -> String {
 fn scan_single_consumer() {
     let _ = env_logger::try_init();
 
-    let client = common::client();
-    let namespace = common::namespace();
-    let set_name = create_test_set(EXPECTED);
+    common::run_on_current_thread(async {
+        let client = common::client().await.unwrap();
+        let namespace = common::namespace();
+        let set_name = create_test_set(&client, EXPECTED).await;
 
-    let spolicy = ScanPolicy::default();
-    let rs = client
-        .scan(&spolicy, namespace, &set_name, Bins::All)
-        .unwrap();
+        let spolicy = ScanPolicy::default();    
+        let rs = client
+            .scan(&spolicy, namespace, &set_name, Bins::All)
+            .await
+            .unwrap();
 
-    let count = (&*rs).filter(Result::is_ok).count();
-    assert_eq!(count, EXPECTED);
-}
-
-#[test]
-fn scan_multi_consumer() {
-    let _ = env_logger::try_init();
-
-    let client = common::client();
-    let namespace = common::namespace();
-    let set_name = create_test_set(EXPECTED);
-
-    let mut spolicy = ScanPolicy::default();
-    spolicy.record_queue_size = 4096;
-    let rs = client
-        .scan(&spolicy, namespace, &set_name, Bins::All)
-        .unwrap();
-
-    let count = Arc::new(AtomicUsize::new(0));
-    let mut threads = vec![];
-
-    for _ in 0..8 {
-        let count = count.clone();
-        let rs = rs.clone();
-        threads.push(thread::spawn(move || {
-            let ok = (&*rs).filter(Result::is_ok).count();
-            count.fetch_add(ok, Ordering::Relaxed);
-        }));
-    }
-
-    for t in threads {
-        t.join().expect("Cannot join thread");
-    }
-
-    assert_eq!(count.load(Ordering::Relaxed), EXPECTED);
+        let count = rs.filter(|r| ready(r.is_ok())).fold(0, |acc, _| async move { acc + 1 }).await;
+        assert_eq!(count, EXPECTED);
+    });
 }
 
 #[test]
 fn scan_node() {
     let _ = env_logger::try_init();
 
-    let client = Arc::new(common::client());
-    let namespace = common::namespace();
-    let set_name = create_test_set(EXPECTED);
+    common::run_on_current_thread(async {
+        let client = Arc::new(common::client().await.unwrap());
+        let namespace = common::namespace();
+        let set_name = create_test_set(&client, EXPECTED).await;
 
-    let count = Arc::new(AtomicUsize::new(0));
-    let mut threads = vec![];
+        let mut tasks = vec![];
 
-    for node in client.nodes() {
-        let client = client.clone();
-        let count = count.clone();
-        let set_name = set_name.clone();
-        threads.push(thread::spawn(move || {
-            let spolicy = ScanPolicy::default();
-            let rs = client
-                .scan_node(&spolicy, node, namespace, &set_name, Bins::All)
-                .unwrap();
-            let ok = (&*rs).filter(Result::is_ok).count();
-            count.fetch_add(ok, Ordering::Relaxed);
-        }));
-    }
+        for node in client.nodes() {
+            println!("node: {}", node);
+            let client = client.clone();
+            let set_name = set_name.clone();
+            tasks.push(tokio::spawn(async move {
+                let spolicy = ScanPolicy::default();
+                client.scan_node(&spolicy, node, namespace, &set_name, Bins::All).await
+            }));
+        }
 
-    for t in threads {
-        t.join().expect("Cannot join thread");
-    }
+        let count: usize = iter(tasks)
+                        .filter_map(|t| async move { t.await.ok().and_then(|r| r.ok()) })
+                        .flat_map(identity)
+                        .filter_map(|r| async move { r.ok().map(|_| 1) })
+                        .collect::<Vec<_>>().await
+                        .iter()
+                        .sum();
 
-    assert_eq!(count.load(Ordering::Relaxed), EXPECTED);
+        assert_eq!(count, EXPECTED);
+    });
 }

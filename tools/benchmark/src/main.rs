@@ -13,29 +13,18 @@
 // License for the specific language governing permissions and limitations under
 // the License.
 
-#[macro_use]
-extern crate aerospike;
-#[macro_use]
-extern crate clap;
-extern crate env_logger;
-#[macro_use]
-extern crate lazy_static;
-#[macro_use]
-extern crate log;
-extern crate num_cpus;
-extern crate rand;
-
 mod cli;
 mod generator;
 mod percent;
 mod stats;
 mod workers;
 
-use std::sync::mpsc;
 use std::sync::Arc;
-use std::thread;
 
 use aerospike::{Client, ClientPolicy};
+use log::info;
+use tokio::runtime::Builder;
+use tokio::sync::mpsc;
 
 use cli::Options;
 use generator::KeyPartitions;
@@ -46,30 +35,33 @@ fn main() {
     let _ = env_logger::try_init();
     let options = cli::parse_options();
     info!("{:?}", options);
-    let client = connect(&options);
-    run_workload(client, options);
+    run_workload(options);
 }
 
-fn connect(options: &Options) -> Client {
-    let mut policy = ClientPolicy::default();
-    policy.conn_pools_per_node = options.conn_pools_per_node;
-    Client::new(&policy, &options.hosts).unwrap()
-}
-
-fn run_workload(client: Client, opts: Options) {
-    let client = Arc::new(client);
-    let (send, recv) = mpsc::channel();
-    let collector = Collector::new(recv);
-    for keys in KeyPartitions::new(
-        opts.namespace,
-        opts.set,
-        opts.start_key,
-        opts.keys,
-        opts.concurrency,
-    ) {
-        let mut worker = Worker::for_workload(&opts.workload, client.clone(), send.clone());
-        thread::spawn(move || worker.run(keys));
-    }
-    drop(send);
-    collector.collect();
+fn run_workload(opts: Options) {
+    let mut rt = Builder::new()
+        .threaded_scheduler()
+        .enable_all()
+        .build()
+        .unwrap();
+    
+    rt.block_on(async {
+        let mut policy = ClientPolicy::default();
+        policy.conn_pools_per_node = opts.conn_pools_per_node;
+        let client = Arc::new(Client::new(&policy, &opts.hosts).await.unwrap());
+        let (tx, rx) = mpsc::unbounded_channel();
+        let collector = Collector::new(rx);
+        for keys in KeyPartitions::new(
+            opts.namespace,
+            opts.set,
+            opts.start_key,
+            opts.keys,
+            opts.concurrency,
+        ) {
+            let mut worker = Worker::for_workload(&opts.workload, client.clone(), tx.clone());
+            tokio::spawn(async move { worker.run(keys).await });
+        }
+        drop(tx);
+        collector.collect().await;
+    });
 }

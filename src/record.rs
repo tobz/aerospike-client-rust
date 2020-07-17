@@ -17,6 +17,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use lazy_static::lazy_static;
+
 use crate::Key;
 use crate::Value;
 

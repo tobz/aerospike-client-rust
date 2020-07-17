@@ -17,11 +17,11 @@
 use std::str;
 
 use pwhash::bcrypt::{self, BcryptSetup, BcryptVariant};
+use error_chain::bail;
 
 use crate::cluster::Cluster;
 use crate::errors::{ErrorKind, Result};
 use crate::net::Connection;
-use crate::net::PooledConnection;
 use crate::ResultCode;
 use crate::policy::AdminPolicy;
 
@@ -59,7 +59,7 @@ impl AdminCommand {
         AdminCommand {}
     }
 
-    fn execute(mut conn: PooledConnection) -> Result<()> {
+    async fn execute(mut conn: &mut Connection) -> Result<()> {
         // Write the message header
         conn.buffer.size_buffer()?;
         let size = conn.buffer.data_offset;
@@ -67,14 +67,12 @@ impl AdminCommand {
         AdminCommand::write_size(&mut conn, size as i64)?;
 
         // Send command.
-        if let Err(err) = conn.flush() {
-            conn.invalidate();
+        if let Err(err) = conn.flush().await {
             return Err(err);
         }
 
         // read header
-        if let Err(err) = conn.read_buffer(HEADER_SIZE) {
-            conn.invalidate();
+        if let Err(err) = conn.read_buffer(HEADER_SIZE).await {
             return Err(err);
         }
 
@@ -87,10 +85,10 @@ impl AdminCommand {
         Ok(())
     }
 
-    pub fn authenticate(conn: &mut Connection, user: &str, password: &str) -> Result<()> {
+    pub async fn authenticate(conn: &mut Connection, user: &str, password: &str) -> Result<()> {
         AdminCommand::set_authenticate(conn, user, password)?;
-        conn.flush()?;
-        conn.read_buffer(HEADER_SIZE)?;
+        conn.flush().await?;
+        conn.read_buffer(HEADER_SIZE).await?;
         let result_code = conn.buffer.read_u8(Some(RESULT_CODE))?;
         let result_code = ResultCode::from(result_code);
         if result_code != ResultCode::Ok {
@@ -114,7 +112,7 @@ impl AdminCommand {
         Ok(())
     }
 
-    pub fn create_user(
+    pub async fn create_user(
         cluster: &Cluster,
         policy: &AdminPolicy,
         user: &str,
@@ -122,7 +120,7 @@ impl AdminCommand {
         roles: &[&str],
     ) -> Result<()> {
         let node = cluster.get_random_node()?;
-        let mut conn = node.get_connection(Some(policy.timeout))?;
+        let mut conn = node.get_connection(Some(policy.timeout)).await?;
 
         conn.buffer.resize_buffer(1024)?;
         conn.buffer.reset_offset()?;
@@ -135,29 +133,39 @@ impl AdminCommand {
         )?;
         AdminCommand::write_roles(&mut conn, roles)?;
 
-        AdminCommand::execute(conn)
+        if let Err(e) = AdminCommand::execute(&mut conn).await {
+            node.invalidate_connection(conn);
+            return Err(e)
+        }
+
+        Ok(())
     }
 
-    pub fn drop_user(cluster: &Cluster, policy: &AdminPolicy, user: &str) -> Result<()> {
+    pub async fn drop_user(cluster: &Cluster, policy: &AdminPolicy, user: &str) -> Result<()> {
         let node = cluster.get_random_node()?;
-        let mut conn = node.get_connection(Some(policy.timeout))?;
+        let mut conn = node.get_connection(Some(policy.timeout)).await?;
 
         conn.buffer.resize_buffer(1024)?;
         conn.buffer.reset_offset()?;
         AdminCommand::write_header(&mut conn, DROP_USER, 1)?;
         AdminCommand::write_field_str(&mut conn, USER, user)?;
 
-        AdminCommand::execute(conn)
+        if let Err(e) = AdminCommand::execute(&mut conn).await {
+            node.invalidate_connection(conn);
+            return Err(e)
+        }
+
+        Ok(())
     }
 
-    pub fn set_password(
+    pub async fn set_password(
         cluster: &Cluster,
         policy: &AdminPolicy,
         user: &str,
         password: &str,
     ) -> Result<()> {
         let node = cluster.get_random_node()?;
-        let mut conn = node.get_connection(Some(policy.timeout))?;
+        let mut conn = node.get_connection(Some(policy.timeout)).await?;
 
         conn.buffer.resize_buffer(1024)?;
         conn.buffer.reset_offset()?;
@@ -169,17 +177,22 @@ impl AdminCommand {
             &AdminCommand::hash_password(password)?,
         )?;
 
-        AdminCommand::execute(conn)
+        if let Err(e) = AdminCommand::execute(&mut conn).await {
+            node.invalidate_connection(conn);
+            return Err(e)
+        }
+
+        Ok(())
     }
 
-    pub fn change_password(
+    pub async fn change_password(
         cluster: &Cluster,
         policy: &AdminPolicy,
         user: &str,
         password: &str,
     ) -> Result<()> {
         let node = cluster.get_random_node()?;
-        let mut conn = node.get_connection(Some(policy.timeout))?;
+        let mut conn = node.get_connection(Some(policy.timeout)).await?;
 
         conn.buffer.resize_buffer(1024)?;
         conn.buffer.reset_offset()?;
@@ -203,17 +216,22 @@ impl AdminCommand {
             &AdminCommand::hash_password(password)?,
         )?;
 
-        AdminCommand::execute(conn)
+        if let Err(e) = AdminCommand::execute(&mut conn).await {
+            node.invalidate_connection(conn);
+            return Err(e)
+        }
+
+        Ok(())
     }
 
-    pub fn grant_roles(
+    pub async fn grant_roles(
         cluster: &Cluster,
         policy: &AdminPolicy,
         user: &str,
         roles: &[&str],
     ) -> Result<()> {
         let node = cluster.get_random_node()?;
-        let mut conn = node.get_connection(Some(policy.timeout))?;
+        let mut conn = node.get_connection(Some(policy.timeout)).await?;
 
         conn.buffer.resize_buffer(1024)?;
         conn.buffer.reset_offset()?;
@@ -221,17 +239,22 @@ impl AdminCommand {
         AdminCommand::write_field_str(&mut conn, USER, user)?;
         AdminCommand::write_roles(&mut conn, roles)?;
 
-        AdminCommand::execute(conn)
+        if let Err(e) = AdminCommand::execute(&mut conn).await {
+            node.invalidate_connection(conn);
+            return Err(e)
+        }
+
+        Ok(())
     }
 
-    pub fn revoke_roles(
+    pub async fn revoke_roles(
         cluster: &Cluster,
         policy: &AdminPolicy,
         user: &str,
         roles: &[&str],
     ) -> Result<()> {
         let node = cluster.get_random_node()?;
-        let mut conn = node.get_connection(Some(policy.timeout))?;
+        let mut conn = node.get_connection(Some(policy.timeout)).await?;
 
         conn.buffer.resize_buffer(1024)?;
         conn.buffer.reset_offset()?;
@@ -239,7 +262,12 @@ impl AdminCommand {
         AdminCommand::write_field_str(&mut conn, USER, user)?;
         AdminCommand::write_roles(&mut conn, roles)?;
 
-        AdminCommand::execute(conn)
+        if let Err(e) = AdminCommand::execute(&mut conn).await {
+            node.invalidate_connection(conn);
+            return Err(e)
+        }
+
+        Ok(())
     }
 
     // Utility methods

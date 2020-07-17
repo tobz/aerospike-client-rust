@@ -22,11 +22,13 @@ use env_logger;
 fn truncate() {
     let _ = env_logger::try_init();
 
-    let client = common::client();
-    let namespace: &str = common::namespace();
-    let set_name = &common::rand_str(10);
-    let wpolicy = WritePolicy::default();
+    common::run_on_current_thread(async {
+        let client = common::client().await.unwrap();
+        let namespace: &str = common::namespace();
+        let set_name = &common::rand_str(10);
+        let wpolicy = WritePolicy::default();
 
-    let result = client.truncate(&wpolicy, namespace, set_name, 0);
-    assert!(result.is_ok());
+        let result = client.truncate(&wpolicy, namespace, set_name, 0).await;
+        assert!(result.is_ok());
+    });
 }

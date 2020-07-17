@@ -24,6 +24,10 @@ use crate::operations::OperationType;
 use crate::policy::WritePolicy;
 use crate::{Bin, ResultCode, Key};
 
+use async_trait::async_trait;
+use error_chain::bail;
+use tracing::warn;
+
 pub struct WriteCommand<'a, A: 'a> {
     single_command: SingleCommand<'a>,
     policy: &'a WritePolicy,
@@ -31,7 +35,7 @@ pub struct WriteCommand<'a, A: 'a> {
     operation: OperationType,
 }
 
-impl<'a, 'b, A: AsRef<Bin<'b>>> WriteCommand<'a, A> {
+impl<'a, A: AsRef<Bin<'a>> + Send + Sync> WriteCommand<'a, A> {
     pub fn new(
         policy: &'a WritePolicy,
         cluster: Arc<Cluster>,
@@ -47,19 +51,20 @@ impl<'a, 'b, A: AsRef<Bin<'b>>> WriteCommand<'a, A> {
         }
     }
 
-    pub fn execute(&mut self) -> Result<()> {
-        SingleCommand::execute(self.policy, self)
+    pub async fn execute(&mut self) -> Result<()> {
+        SingleCommand::execute(self.policy, self).await
     }
 }
 
-impl<'a, 'b, A: AsRef<Bin<'b>>> Command for WriteCommand<'a, A> {
+#[async_trait]
+impl<'a, A: AsRef<Bin<'a>> + Send + Sync> Command for WriteCommand<'a, A> {
     fn write_timeout(&mut self, conn: &mut Connection, timeout: Option<Duration>) -> Result<()> {
         conn.buffer.write_timeout(timeout);
         Ok(())
     }
 
-    fn write_buffer(&mut self, conn: &mut Connection) -> Result<()> {
-        conn.flush()
+    async fn write_buffer(&mut self, conn: &mut Connection) -> Result<()> {
+        conn.flush().await
     }
 
     fn prepare_buffer(&mut self, conn: &mut Connection) -> Result<()> {
@@ -75,9 +80,9 @@ impl<'a, 'b, A: AsRef<Bin<'b>>> Command for WriteCommand<'a, A> {
         self.single_command.get_node()
     }
 
-    fn parse_result(&mut self, conn: &mut Connection) -> Result<()> {
+    async fn parse_result(&mut self, conn: &mut Connection) -> Result<()> {
         // Read header.
-        if let Err(err) = conn.read_buffer(buffer::MSG_TOTAL_HEADER_SIZE as usize) {
+        if let Err(err) = conn.read_buffer(buffer::MSG_TOTAL_HEADER_SIZE as usize).await {
             warn!("Parse result error: {}", err);
             return Err(err);
         }
@@ -89,6 +94,6 @@ impl<'a, 'b, A: AsRef<Bin<'b>>> Command for WriteCommand<'a, A> {
             bail!(ErrorKind::ServerError(result_code));
         }
 
-        SingleCommand::empty_socket(conn)
+        SingleCommand::empty_socket(conn).await
     }
 }

@@ -20,13 +20,15 @@
 //! Handling an error returned by the client.
 //!
 //! ```rust
-//! use aerospike::*;
-//!
+//! # use aerospike::*;
+//! # #[tokio::main(max_threads = 1)]
+//! # async fn main() {
 //! let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
-//! let policy = ClientPolicy::default();
-//! let client = Client::new(&policy, &hosts).expect("Failed to connect to cluster");
+//! let client = Client::new(&ClientPolicy::default(), &hosts).await
+//!     .expect("failed to create client");
+//!
 //! let key = as_key!("test", "test", "someKey");
-//! match client.get(&ReadPolicy::default(), &key, Bins::None) {
+//! match client.get(&ReadPolicy::default(), &key, Bins::None).await {
 //!     Ok(record) => {
 //!         match record.time_to_live() {
 //!             None => println!("record never expires"),
@@ -48,11 +50,14 @@
 //!         }
 //!     }
 //! }
+//! # }
 //! ```
 
 #![allow(missing_docs)]
 
 use crate::ResultCode;
+
+use error_chain::error_chain;
 
 error_chain! {
 
@@ -73,6 +78,8 @@ error_chain! {
             #[doc = "Error parsing an integer"];
         PwHash(::pwhash::error::Error)
             #[doc = "Error returned while hashing a password for user authentication"];
+        ExecutorSpawn(::tokio::task::JoinError)
+            #[doc = "Error returned when a failure to spawn a Tokio task occurs"];
     }
 
 // Additional `ErrorKind` variants.
@@ -107,6 +114,30 @@ error_chain! {
         NoMoreConnections {
             description("Too many connections")
             display("Too many connections")
+        }
+
+/// Failed to connect to a node.
+        FailedToConnect {
+            description("Failed to connect to a node")
+            display("Failed to connect to a node")
+        }
+
+/// Connection is passed the idle deadline and must be torn down.
+        ConnectionPastIdleDeadline {
+            description("Connection is past idle deadline")
+            display("Connection is past idle deadline")
+        }
+
+/// Timed out trying to retrieve a connection from the connection pool.
+        PoolTimedOut {
+            description("Timed out trying to retrieve a connection")
+            display("Timed out trying to retrieve a connection")
+        }
+
+/// Error returned when trying to send to a closed receiver
+        ReceiverClosed {
+            description("The receiver for the scan/query command has been closed")
+            display("The receiver for the scan/query command has been closed")
         }
 
 /// Server responded with a response code indicating an error condition.

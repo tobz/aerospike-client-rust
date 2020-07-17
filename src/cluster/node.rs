@@ -22,12 +22,15 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tracing::error;
+use error_chain::bail;
+use deadpool::managed::Object;
 use parking_lot::RwLock;
 
 use crate::cluster::node_validator::NodeValidator;
 use crate::commands::Message;
-use crate::errors::{ErrorKind, Result, ResultExt};
-use crate::net::{ConnectionPool, Host, PooledConnection};
+use crate::errors::{Error, ErrorKind, Result, ResultExt};
+use crate::net::{Connection, ConnectionPool, Host};
 use crate::policy::ClientPolicy;
 
 pub const PARTITIONS: usize = 4096;
@@ -109,7 +112,7 @@ impl Node {
         self.reference_count.load(Ordering::Relaxed)
     }
 
-    pub fn refresh(&self, current_aliases: HashMap<Host, Arc<Node>>) -> Result<Vec<Host>> {
+    pub async fn refresh(&self, current_aliases: HashMap<Host, Arc<Node>>) -> Result<Vec<Host>> {
         self.reference_count.store(0, Ordering::Relaxed);
         self.responded.store(false, Ordering::Relaxed);
         self.refresh_count.fetch_add(1, Ordering::Relaxed);
@@ -122,6 +125,7 @@ impl Node {
         ];
         let info_map = self
             .info(None, &commands)
+            .await
             .chain_err(|| "Info command failed")?;
         self.validate_node(&info_map)
             .chain_err(|| "Failed to validate node")?;
@@ -242,10 +246,6 @@ impl Node {
         Ok(())
     }
 
-    pub fn get_connection(&self, timeout: Option<Duration>) -> Result<PooledConnection> {
-        self.connection_pool.get(timeout)
-    }
-
     pub fn failures(&self) -> usize {
         self.failures.load(Ordering::Relaxed)
     }
@@ -276,25 +276,34 @@ impl Node {
         self.reference_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn close(&mut self) {
+    pub async fn close(&mut self) {
         self.inactivate();
-        self.connection_pool.close();
+        self.connection_pool.close().await;
     }
 
-    pub fn info(
+    pub async fn info(
         &self,
         timeout: Option<Duration>,
         commands: &[&str],
     ) -> Result<HashMap<String, String>> {
-        let mut conn = self.get_connection(timeout)?;
-        Message::info(&mut conn, commands).or_else(|e| {
-            conn.invalidate();
-            Err(e)
-        })
+        let mut conn = self.connection_pool.get(timeout).await?;
+        Message::info(&mut conn, commands).await
+            .or_else(|e| {
+                self.connection_pool.invalidate(conn);
+                Err(e)
+            })
     }
 
     pub fn partition_generation(&self) -> isize {
         self.partition_generation.load(Ordering::Relaxed)
+    }
+
+    pub async fn get_connection(&self, timeout: Option<Duration>) -> Result<Object<Connection, Error>> {
+        self.connection_pool.get(timeout).await
+    }
+
+    pub fn invalidate_connection(&self, connection: Object<Connection, Error>) {
+        self.connection_pool.invalidate(connection);
     }
 }
 

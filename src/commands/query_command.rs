@@ -20,12 +20,16 @@ use crate::commands::{Command, SingleCommand, StreamCommand};
 use crate::errors::Result;
 use crate::net::Connection;
 use crate::policy::QueryPolicy;
-use crate::{Statement, Recordset};
+use crate::{Statement, RecordSender};
+
+use async_trait::async_trait;
+use rand::{Rng, thread_rng};
 
 pub struct QueryCommand<'a> {
     stream_command: StreamCommand,
     policy: &'a QueryPolicy,
     statement: Arc<Statement>,
+    task_id: u64,
 }
 
 impl<'a> QueryCommand<'a> {
@@ -33,28 +37,30 @@ impl<'a> QueryCommand<'a> {
         policy: &'a QueryPolicy,
         node: Arc<Node>,
         statement: Arc<Statement>,
-        recordset: Arc<Recordset>,
+        tx: RecordSender,
     ) -> Self {
         QueryCommand {
-            stream_command: StreamCommand::new(node, recordset),
+            stream_command: StreamCommand::new(node, tx),
             policy,
             statement,
+            task_id: thread_rng().gen(),
         }
     }
 
-    pub fn execute(&mut self) -> Result<()> {
-        SingleCommand::execute(self.policy, self)
+    pub async fn execute(&mut self) -> Result<()> {
+        SingleCommand::execute(self.policy, self).await
     }
 }
 
+#[async_trait]
 impl<'a> Command for QueryCommand<'a> {
     fn write_timeout(&mut self, conn: &mut Connection, timeout: Option<Duration>) -> Result<()> {
         conn.buffer.write_timeout(timeout);
         Ok(())
     }
 
-    fn write_buffer(&mut self, conn: &mut Connection) -> Result<()> {
-        conn.flush()
+    async fn write_buffer(&mut self, conn: &mut Connection) -> Result<()> {
+        conn.flush().await
     }
 
     fn prepare_buffer(&mut self, conn: &mut Connection) -> Result<()> {
@@ -62,7 +68,7 @@ impl<'a> Command for QueryCommand<'a> {
             self.policy,
             &self.statement,
             false,
-            self.stream_command.recordset.task_id(),
+            self.task_id,
         )
     }
 
@@ -70,7 +76,7 @@ impl<'a> Command for QueryCommand<'a> {
         self.stream_command.get_node()
     }
 
-    fn parse_result(&mut self, conn: &mut Connection) -> Result<()> {
-        StreamCommand::parse_result(&mut self.stream_command, conn)
+    async fn parse_result(&mut self, conn: &mut Connection) -> Result<()> {
+        StreamCommand::parse_result(&mut self.stream_command, conn).await
     }
 }

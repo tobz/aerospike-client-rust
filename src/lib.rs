@@ -62,31 +62,28 @@
 //!
 //! The following is a very simple example of CRUD operations in an Aerospike database.
 //!
-//! ```rust
-//! #[macro_use]
-//! extern crate aerospike;
-//!
+//! ```rust//!
 //! use std::env;
 //! use std::sync::Arc;
 //! use std::time::Instant;
-//! use std::thread;
 //!
 //! use aerospike::{Bins, Client, ClientPolicy, ReadPolicy, WritePolicy};
+//! use aerospike::{as_bin, as_key};
 //! use aerospike::operations;
 //!
-//! fn main() {
-//!     let cpolicy = ClientPolicy::default();
+//! # #[tokio::main(max_threads = 1)]
+//! async fn main() {
 //!     let hosts = env::var("AEROSPIKE_HOSTS")
 //!         .unwrap_or(String::from("127.0.0.1:3000"));
-//!     let client = Client::new(&cpolicy, &hosts)
-//!         .expect("Failed to connect to cluster");
+//!     let client = Client::new(&ClientPolicy::default(), &hosts).await
+//!         .expect("failed to create client");
 //!     let client = Arc::new(client);
 //!
-//!     let mut threads = vec![];
+//!     let mut tasks = vec![];
 //!     let now = Instant::now();
 //!     for i in 0..2 {
 //!         let client = client.clone();
-//!         let t = thread::spawn(move || {
+//!         let t = tokio::spawn(async move {
 //!             let rpolicy = ReadPolicy::default();
 //!             let wpolicy = WritePolicy::default();
 //!             let key = as_key!("test", "test", i);
@@ -95,37 +92,37 @@
 //!                 as_bin!("str", "Hello, World!"),
 //!             ];
 //!
-//!             client.put(&wpolicy, &key, &bins).unwrap();
-//!             let rec = client.get(&rpolicy, &key, Bins::All);
+//!             client.put(&wpolicy, &key, &bins).await.unwrap();
+//!             let rec = client.get(&rpolicy, &key, Bins::All).await;
 //!             println!("Record: {}", rec.unwrap());
 //!
-//!             client.touch(&wpolicy, &key).unwrap();
-//!             let rec = client.get(&rpolicy, &key, Bins::All);
+//!             client.touch(&wpolicy, &key).await.unwrap();
+//!             let rec = client.get(&rpolicy, &key, Bins::All).await;
 //!             println!("Record: {}", rec.unwrap());
 //!
-//!             let rec = client.get(&rpolicy, &key, Bins::None);
+//!             let rec = client.get(&rpolicy, &key, Bins::None).await;
 //!             println!("Record Header: {}", rec.unwrap());
 //!
-//!             let exists = client.exists(&wpolicy, &key).unwrap();
+//!             let exists = client.exists(&wpolicy, &key).await.unwrap();
 //!             println!("exists: {}", exists);
 //!
 //!             let bin = as_bin!("int", 999);
 //!             let ops = &vec![operations::put(&bin), operations::get()];
-//!             let op_rec = client.operate(&wpolicy, &key, ops);
+//!             let op_rec = client.operate(&wpolicy, &key, ops).await;
 //!             println!("operate: {}", op_rec.unwrap());
 //!
-//!             let existed = client.delete(&wpolicy, &key).unwrap();
+//!             let existed = client.delete(&wpolicy, &key).await.unwrap();
 //!             println!("existed (sould be true): {}", existed);
 //!
-//!             let existed = client.delete(&wpolicy, &key).unwrap();
+//!             let existed = client.delete(&wpolicy, &key).await.unwrap();
 //!             println!("existed (should be false): {}", existed);
 //!         });
 //!
-//!         threads.push(t);
+//!         tasks.push(t);
 //!     }
 //!
-//!     for t in threads {
-//!         t.join().unwrap();
+//!     for t in tasks {
+//!         t.await.unwrap();
 //!     }
 //!
 //!     println!("total time: {:?}", now.elapsed());
@@ -134,21 +131,6 @@
 
 // `error_chain` can recurse deeply
 #![recursion_limit = "1024"]
-
-extern crate base64;
-extern crate byteorder;
-extern crate crossbeam_queue;
-extern crate ripemd160;
-#[macro_use]
-extern crate error_chain;
-#[macro_use]
-extern crate lazy_static;
-#[macro_use]
-extern crate log;
-extern crate parking_lot;
-extern crate pwhash;
-extern crate rand;
-extern crate scoped_pool;
 
 pub use batch::BatchRead;
 pub use bin::{Bin, Bins};
@@ -162,7 +144,7 @@ pub use policy::{
     GenerationPolicy, Policy, Priority, QueryPolicy, ReadPolicy, RecordExistsAction, ScanPolicy,
     WritePolicy,
 };
-pub use query::{CollectionIndexType, IndexType, Recordset, Statement, UDFLang};
+pub use query::{CollectionIndexType, IndexType, RecordSet, RecordSender, Statement, UDFLang};
 pub use record::Record;
 pub use result_code::ResultCode;
 pub use user::User;

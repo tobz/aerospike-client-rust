@@ -25,58 +25,60 @@ use crate::common;
 fn batch_get() {
     let _ = env_logger::try_init();
 
-    let client = common::client();
-    let namespace: &str = common::namespace();
-    let set_name = &common::rand_str(10);
-    let mut bpolicy = BatchPolicy::default();
-    bpolicy.concurrency = Concurrency::Parallel;
-    let wpolicy = WritePolicy::default();
+    common::run_on_current_thread(async {
+        let client = common::client().await.unwrap();
+        let namespace: &str = common::namespace();
+        let set_name = &common::rand_str(10);
+        let mut bpolicy = BatchPolicy::default();
+        bpolicy.concurrency = Concurrency::Parallel;
+        let wpolicy = WritePolicy::default();
 
-    let bin1 = as_bin!("a", "a value");
-    let bin2 = as_bin!("b", "another value");
-    let bin3 = as_bin!("c", 42);
+        let bin1 = as_bin!("a", "a value");
+        let bin2 = as_bin!("b", "another value");
+        let bin3 = as_bin!("c", 42);
 
-    let key1 = as_key!(namespace, set_name, 1);
-    client.put(&wpolicy, &key1, &[&bin1, &bin2, &bin3]).unwrap();
+        let key1 = as_key!(namespace, set_name, 1);
+        client.put(&wpolicy, &key1, &[&bin1, &bin2, &bin3]).await.unwrap();
 
-    let key2 = as_key!(namespace, set_name, 2);
-    client.put(&wpolicy, &key2, &[&bin1, &bin2, &bin3]).unwrap();
+        let key2 = as_key!(namespace, set_name, 2);
+        client.put(&wpolicy, &key2, &[&bin1, &bin2, &bin3]).await.unwrap();
 
-    let key3 = as_key!(namespace, set_name, 3);
-    client.put(&wpolicy, &key3, &[&bin1, &bin2, &bin3]).unwrap();
+        let key3 = as_key!(namespace, set_name, 3);
+        client.put(&wpolicy, &key3, &[&bin1, &bin2, &bin3]).await.unwrap();
 
-    let key4 = as_key!(namespace, set_name, -1);
-    // key does not exist
+        let key4 = as_key!(namespace, set_name, -1);
+        // key does not exist
 
-    let selected = Bins::from(["a"]);
-    let all = Bins::All;
-    let none = Bins::None;
+        let selected = Bins::from(["a"]);
+        let all = Bins::All;
+        let none = Bins::None;
 
-    let batch = vec![
-        BatchRead::new(key1.clone(), &selected),
-        BatchRead::new(key2.clone(), &all),
-        BatchRead::new(key3.clone(), &none),
-        BatchRead::new(key4.clone(), &none),
-    ];
-    let mut results = client.batch_get(&bpolicy, batch).unwrap();
+        let batch = vec![
+            BatchRead::new(key1.clone(), &selected),
+            BatchRead::new(key2.clone(), &all),
+            BatchRead::new(key3.clone(), &none),
+            BatchRead::new(key4.clone(), &none),
+        ];
+        let mut results = client.batch_get(&bpolicy, batch).await.unwrap();
 
-    let result = results.remove(0);
-    assert_eq!(result.key, key1);
-    let record = result.record.unwrap();
-    assert_eq!(record.bins.keys().count(), 1);
+        let result = results.remove(0);
+        assert_eq!(result.key, key1);
+        let record = result.record.unwrap();
+        assert_eq!(record.bins.keys().count(), 1);
 
-    let result = results.remove(0);
-    assert_eq!(result.key, key2);
-    let record = result.record.unwrap();
-    assert_eq!(record.bins.keys().count(), 3);
+        let result = results.remove(0);
+        assert_eq!(result.key, key2);
+        let record = result.record.unwrap();
+        assert_eq!(record.bins.keys().count(), 3);
 
-    let result = results.remove(0);
-    assert_eq!(result.key, key3);
-    let record = result.record.unwrap();
-    assert_eq!(record.bins.keys().count(), 0);
+        let result = results.remove(0);
+        assert_eq!(result.key, key3);
+        let record = result.record.unwrap();
+        assert_eq!(record.bins.keys().count(), 0);
 
-    let result = results.remove(0);
-    assert_eq!(result.key, key4);
-    let record = result.record;
-    assert!(record.is_none());
+        let result = results.remove(0);
+        assert_eq!(result.key, key4);
+        let record = result.record;
+        assert!(record.is_none());
+    })
 }

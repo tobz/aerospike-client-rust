@@ -14,7 +14,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 
 use crate::cluster::Node;
@@ -23,28 +22,25 @@ use crate::commands::field_type::FieldType;
 use crate::commands::Command;
 use crate::errors::{ErrorKind, Result};
 use crate::net::Connection;
-use crate::query::Recordset;
+use crate::query::RecordSender;
 use crate::value::bytes_to_particle;
 use crate::{Record, Value, ResultCode, Key};
 
+use async_trait::async_trait;
+use error_chain::bail;
+use tracing::warn;
+
 pub struct StreamCommand {
     node: Arc<Node>,
-    pub recordset: Arc<Recordset>,
-}
-
-impl Drop for StreamCommand {
-    fn drop(&mut self) {
-        // signal_end
-        self.recordset.signal_end();
-    }
+    sender: RecordSender,
 }
 
 impl StreamCommand {
-    pub fn new(node: Arc<Node>, recordset: Arc<Recordset>) -> Self {
-        StreamCommand { node, recordset }
+    pub fn new(node: Arc<Node>, sender: RecordSender) -> Self {
+        StreamCommand { node, sender }
     }
 
-    fn parse_record(conn: &mut Connection, size: usize) -> Result<Option<Record>> {
+    async fn parse_record(conn: &mut Connection, size: usize) -> Result<Option<Record>> {
         // A number of these are commented out because we just don't care enough to read
         // that section of the header. If we do care, uncomment and check!
         let result_code = ResultCode::from(conn.buffer.read_u8(Some(5))?);
@@ -52,7 +48,7 @@ impl StreamCommand {
             if result_code == ResultCode::KeyNotFoundError {
                 if conn.bytes_read() < size {
                     let remaining = size - conn.bytes_read();
-                    conn.read_buffer(remaining)?;
+                    conn.read_buffer(remaining).await?;
                 }
                 return Ok(None);
             }
@@ -73,22 +69,22 @@ impl StreamCommand {
         let field_count = conn.buffer.read_u16(None)? as usize; // almost certainly 0
         let op_count = conn.buffer.read_u16(None)? as usize;
 
-        let key = StreamCommand::parse_key(conn, field_count)?;
+        let key = StreamCommand::parse_key(conn, field_count).await?;
 
         let mut bins: HashMap<String, Value> = HashMap::with_capacity(op_count);
 
         for _ in 0..op_count {
-            conn.read_buffer(8)?;
+            conn.read_buffer(8).await?;
             let op_size = conn.buffer.read_u32(None)? as usize;
             conn.buffer.skip(1)?;
             let particle_type = conn.buffer.read_u8(None)?;
             conn.buffer.skip(1)?;
             let name_size = conn.buffer.read_u8(None)? as usize;
-            conn.read_buffer(name_size)?;
+            conn.read_buffer(name_size).await?;
             let name: String = conn.buffer.read_str(name_size)?;
 
             let particle_bytes_size = op_size - (4 + name_size);
-            conn.read_buffer(particle_bytes_size)?;
+            conn.read_buffer(particle_bytes_size).await?;
             let value = bytes_to_particle(particle_type, &mut conn.buffer, particle_bytes_size)?;
 
             bins.insert(name, value);
@@ -98,47 +94,44 @@ impl StreamCommand {
         Ok(Some(record))
     }
 
-    fn parse_stream(&mut self, conn: &mut Connection, size: usize) -> Result<bool> {
-        while self.recordset.is_active() && conn.bytes_read() < size {
+    async fn parse_stream(&mut self, conn: &mut Connection, size: usize) -> Result<bool> {
+        while conn.bytes_read() < size {
             // Read header.
-            if let Err(err) = conn.read_buffer(buffer::MSG_REMAINING_HEADER_SIZE as usize) {
+            if let Err(err) = conn.read_buffer(buffer::MSG_REMAINING_HEADER_SIZE as usize).await {
                 warn!("Parse result error: {}", err);
                 return Err(err);
             }
 
-            let res = StreamCommand::parse_record(conn, size);
-            match res {
-                Ok(Some(mut rec)) => loop {
-                    let result = self.recordset.push(Ok(rec));
-                    match result {
-                        None => break,
-                        Some(returned) => {
-                            rec = returned?;
-                            thread::yield_now();
-                        }
+            let result = StreamCommand::parse_record(conn, size).await;
+            match result {
+                Ok(Some(record)) => {
+                    if let Err(_) = self.sender.send(Ok(record)).await {
+                        return Err(ErrorKind::ReceiverClosed.into())
                     }
                 },
                 Ok(None) => return Ok(false),
                 Err(err) => {
-                    self.recordset.push(Err(err));
+                    if let Err(_) = self.sender.send(Err(err)).await {
+                        return Err(ErrorKind::ReceiverClosed.into())
+                    }
                     return Ok(false);
-                }
+                },
             };
         }
 
         Ok(true)
     }
 
-    pub fn parse_key(conn: &mut Connection, field_count: usize) -> Result<Key> {
+    pub async fn parse_key(conn: &mut Connection, field_count: usize) -> Result<Key> {
         let mut digest: [u8; 20] = [0; 20];
         let mut namespace: String = "".to_string();
         let mut set_name: String = "".to_string();
         let mut orig_key: Option<Value> = None;
 
         for _ in 0..field_count {
-            conn.read_buffer(4)?;
+            conn.read_buffer(4).await?;
             let field_len = conn.buffer.read_u32(None)? as usize;
-            conn.read_buffer(field_len)?;
+            conn.read_buffer(field_len).await?;
             let field_type = conn.buffer.read_u8(None)?;
 
             match field_type {
@@ -173,18 +166,19 @@ impl StreamCommand {
     }
 }
 
+#[async_trait]
 impl Command for StreamCommand {
     fn write_timeout(&mut self, conn: &mut Connection, timeout: Option<Duration>) -> Result<()> {
         conn.buffer.write_timeout(timeout);
         Ok(())
     }
 
-    fn write_buffer(&mut self, conn: &mut Connection) -> Result<()> {
-        conn.flush()
+    async fn write_buffer(&mut self, conn: &mut Connection) -> Result<()> {
+        let result = conn.flush().await;
+        result
     }
 
-    #[allow(unused_variables)]
-    fn prepare_buffer(&mut self, conn: &mut Connection) -> Result<()> {
+    fn prepare_buffer(&mut self, _conn: &mut Connection) -> Result<()> {
         // should be implemented downstream
         unreachable!()
     }
@@ -193,17 +187,17 @@ impl Command for StreamCommand {
         Ok(self.node.clone())
     }
 
-    fn parse_result(&mut self, conn: &mut Connection) -> Result<()> {
+    async fn parse_result(&mut self, conn: &mut Connection) -> Result<()> {
         let mut status = true;
 
         while status {
-            conn.read_buffer(8)?;
+            conn.read_buffer(8).await?;
             let size = conn.buffer.read_msg_size(None)?;
             conn.bookmark();
 
             status = false;
             if size > 0 {
-                status = self.parse_stream(conn, size as usize)?;
+                status = self.parse_stream(conn, size as usize).await?;
             }
         }
 

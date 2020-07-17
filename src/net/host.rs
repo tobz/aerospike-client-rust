@@ -14,9 +14,6 @@
 // the License.
 
 use std::fmt;
-use std::io;
-use std::net::{SocketAddr, ToSocketAddrs};
-use std::vec::IntoIter;
 
 use crate::errors::{ErrorKind, Result, ResultExt};
 use crate::net::parser::Parser;
@@ -44,12 +41,10 @@ impl Host {
     pub fn address(&self) -> String {
         format!("{}:{}", self.name, self.port)
     }
-}
 
-impl ToSocketAddrs for Host {
-    type Iter = IntoIter<SocketAddr>;
-    fn to_socket_addrs(&self) -> io::Result<IntoIter<SocketAddr>> {
-        (self.name.as_str(), self.port).to_socket_addrs()
+    /// Returns the socket address in a way that can be consumed by Tokio.
+    pub fn as_socket_addr(&self) -> (&str, u16) {
+        (self.name.as_str(), self.port)
     }
 }
 

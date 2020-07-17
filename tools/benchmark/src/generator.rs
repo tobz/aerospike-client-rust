@@ -13,7 +13,7 @@
 // License for the specific language governing permissions and limitations under
 // the License.
 
-use aerospike::Key;
+use aerospike::{Key, as_key};
 
 #[derive(Debug)]
 pub struct KeyPartitions {

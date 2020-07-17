@@ -87,10 +87,7 @@ pub trait PolicyLike {
     fn base(&self) -> &BasePolicy;
 }
 
-impl<T> Policy for T
-where
-    T: PolicyLike,
-{
+impl<T: PolicyLike> Policy for &'_ T {
     fn priority(&self) -> &Priority {
         self.base().priority()
     }
@@ -171,5 +168,11 @@ impl Policy for BasePolicy {
 
     fn sleep_between_retries(&self) -> Option<Duration> {
         self.sleep_between_retries
+    }
+}
+
+impl PolicyLike for BasePolicy {
+    fn base(&self) -> &BasePolicy {
+        self
     }
 }

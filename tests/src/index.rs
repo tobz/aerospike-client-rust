@@ -13,57 +13,49 @@
 // License for the specific language governing permissions and limitations under
 // the License.
 
-use std::thread;
 use std::time::Duration;
 
 use crate::common;
 use env_logger;
 
 use aerospike::*;
+use tokio::time::delay_for;
 
 const EXPECTED: usize = 100;
-
-fn create_test_set(no_records: usize) -> String {
-    let client = common::client();
-    let namespace = common::namespace();
-    let set_name = common::rand_str(10);
-    let wpolicy = WritePolicy::default();
-
-    for i in 0..no_records as i64 {
-        let key = as_key!(namespace, &set_name, i);
-        let wbin = as_bin!("bin", i);
-        let bins = vec![&wbin];
-        client.delete(&wpolicy, &key).unwrap();
-        client.put(&wpolicy, &key, &bins).unwrap();
-    }
-
-    // FIXME: replace sleep with wait task
-    thread::sleep(Duration::from_millis(3000));
-
-    set_name
-}
 
 #[test]
 #[should_panic(expected = "IndexFound")]
 fn recreate_index() {
     let _ = env_logger::try_init();
 
-    let client = common::client();
-    let ns = common::namespace();
-    let set = create_test_set(EXPECTED);
-    let bin = "bin";
-    let index = format!("{}_{}_{}", ns, set, bin);
-    let policy = WritePolicy::default();
+    common::run_on_current_thread(async {
+        let client = common::client().await.unwrap();
+        let ns = common::namespace();
+        let set = common::rand_str(10);
+        let policy = WritePolicy::default();
+        for i in 0..EXPECTED as i64 {
+            let key = as_key!(ns, &set, i);
+            let wbin = as_bin!("bin", i);
+            let bins = vec![&wbin];
+            client.delete(&policy, &key).await.unwrap();
+            client.put(&policy, &key, &bins).await.unwrap();
+        }
+        delay_for(Duration::from_millis(3000)).await;
+        let bin = "bin";
+        let index = format!("{}_{}_{}", ns, set, bin);
 
-    let _ = client.drop_index(&policy, ns, &set, &index);
-    thread::sleep(Duration::from_millis(1000));
+        let _ = client.drop_index(&policy, ns, &set, &index).await;
+        delay_for(Duration::from_millis(1000)).await;
 
-    client
-        .create_index(&policy, ns, &set, bin, &index, IndexType::Numeric)
-        .expect("Failed to create index");
-    thread::sleep(Duration::from_millis(1000));
+        client
+            .create_index(&policy, ns, &set, bin, &index, IndexType::Numeric)
+            .await
+            .expect("Failed to create index");
+        delay_for(Duration::from_millis(1000)).await;
 
-    client
-        .create_index(&policy, ns, &set, bin, &index, IndexType::Numeric)
-        .unwrap();
+        client
+            .create_index(&policy, ns, &set, bin, &index, IndexType::Numeric)
+            .await
+            .unwrap();
+    });
 }

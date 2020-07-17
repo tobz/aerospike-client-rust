@@ -14,10 +14,13 @@
 // the License.
 
 use std::f64;
-use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use workers::Status;
+use lazy_static::lazy_static;
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::stream::StreamExt;
+
+use crate::workers::Status;
 
 // Number of buckets for latency histogram, e.g.
 // 6 buckets => "<1ms", "<2ms", "<4ms", "<8ms", "<16ms", ">=16ms"
@@ -30,21 +33,21 @@ lazy_static! {
 
 #[derive(Debug)]
 pub struct Collector {
-    receiver: Receiver<Histogram>,
+    rx: UnboundedReceiver<Histogram>,
     histogram: Histogram,
 }
 
 impl Collector {
-    pub fn new(recv: Receiver<Histogram>) -> Self {
+    pub fn new(rx: UnboundedReceiver<Histogram>) -> Self {
         Collector {
-            receiver: recv,
+            rx,
             histogram: Histogram::new(),
         }
     }
 
-    pub fn collect(mut self) {
+    pub async fn collect(mut self) {
         let mut last_report = Instant::now();
-        for hist in self.receiver.iter() {
+        for hist in self.rx.next().await {
             self.histogram.merge(hist);
             if last_report.elapsed() > *REPORT_MS {
                 self.report();

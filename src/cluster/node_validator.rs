@@ -16,6 +16,9 @@ use std::net::ToSocketAddrs;
 use std::str;
 use std::vec::Vec;
 
+use tracing::debug;
+use error_chain::bail;
+
 use crate::cluster::Cluster;
 use crate::commands::Message;
 use crate::errors::{ErrorKind, Result, ResultExt};
@@ -53,13 +56,13 @@ impl NodeValidator {
         }
     }
 
-    pub fn validate_node(&mut self, cluster: &Cluster, host: &Host) -> Result<()> {
+    pub async fn validate_node(&mut self, cluster: &Cluster, host: &Host) -> Result<()> {
         self.resolve_aliases(host)
             .chain_err(|| "Failed to resolve host aliases")?;
 
         let mut last_err = None;
         for alias in &self.aliases() {
-            match self.validate_alias(cluster, alias) {
+            match self.validate_alias(cluster, alias).await {
                 Ok(_) => return Ok(()),
                 Err(err) => {
                     debug!("Alias {} failed: {:?}", alias, err);
@@ -90,10 +93,9 @@ impl NodeValidator {
         }
     }
 
-    fn validate_alias(&mut self, cluster: &Cluster, alias: &Host) -> Result<()> {
-        let mut conn = Connection::new(&alias, &self.client_policy)?;
-        conn.set_timeout(self.client_policy.timeout)?;
-        let info_map = Message::info(&mut conn, &["node", "cluster-name", "features"])?;
+    async fn validate_alias(&mut self, cluster: &Cluster, alias: &Host) -> Result<()> {
+        let mut conn = Connection::new(alias.as_socket_addr(), &self.client_policy).await?;
+        let info_map = Message::info(&mut conn, &["node", "cluster-name", "features"]).await?;
 
         match info_map.get("node") {
             None => bail!(ErrorKind::InvalidNode(String::from("Missing node name"))),

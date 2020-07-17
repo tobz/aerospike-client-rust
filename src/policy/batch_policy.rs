@@ -16,6 +16,7 @@
 use crate::policy::{BasePolicy, Concurrency, PolicyLike};
 
 /// `BatchPolicy` encapsulates parameters for all batch operations.
+#[derive(Debug, Clone)]
 pub struct BatchPolicy {
     /// Base policy instance
     pub base_policy: BasePolicy,

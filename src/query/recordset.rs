@@ -13,97 +13,36 @@
 // License for the specific language governing permissions and limitations under
 // the License.
 
-extern crate rand;
-
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::thread;
-
-use crossbeam_queue::SegQueue;
-use rand::Rng;
+use std::task::{Context, Poll};
+use std::pin::Pin;
 
 use crate::errors::Result;
-use crate::Record;
+use crate::record::Record;
 
-/// Virtual collection of records retrieved through queries and scans. During a query/scan,
-/// multiple threads will retrieve records from the server nodes and put these records on an
-/// internal queue managed by the recordset. The single user thread consumes these records from the
-/// queue.
-pub struct Recordset {
-    instances: AtomicUsize,
-    record_queue_count: AtomicUsize,
-    record_queue_size: AtomicUsize,
-    record_queue: SegQueue<Result<Record>>,
-    active: AtomicBool,
-    task_id: AtomicUsize,
-}
+use tokio::sync::mpsc::{channel, Sender, Receiver};
+use tokio::stream::Stream;
 
-impl Recordset {
-    #[doc(hidden)]
-    pub fn new(rec_queue_size: usize, nodes: usize) -> Self {
-        let mut rng = rand::thread_rng();
-        let task_id = rng.gen::<usize>();
+/// Sender side of a record set.
+pub type RecordSender = Sender<Result<Record>>;
 
-        Recordset {
-            instances: AtomicUsize::new(nodes),
-            record_queue_size: AtomicUsize::new(rec_queue_size),
-            record_queue_count: AtomicUsize::new(0),
-            record_queue: SegQueue::new(),
-            active: AtomicBool::new(true),
-            task_id: AtomicUsize::new(task_id),
-        }
-    }
+/// Set of records returned by a scan/query operation.
+pub struct RecordSet(Receiver<Result<Record>>);
 
-    /// Close the query.
-    pub fn close(&self) {
-        self.active.store(false, Ordering::Relaxed)
-    }
+impl RecordSet {
+    /// Creates a new record set, and sender, with the given capacity.
+    pub fn new(capacity: usize) -> (RecordSender, RecordSet) {
+        let (tx, rx) = channel(capacity);
 
-    /// Check whether the query is still active.
-    pub fn is_active(&self) -> bool {
-        self.active.load(Ordering::Relaxed)
-    }
-
-    #[doc(hidden)]
-    pub fn push(&self, record: Result<Record>) -> Option<Result<Record>> {
-        if self.record_queue_count.fetch_add(1, Ordering::Relaxed)
-            < self.record_queue_size.load(Ordering::Relaxed)
-        {
-            self.record_queue.push(record);
-            return None;
-        }
-        self.record_queue_count.fetch_sub(1, Ordering::Relaxed);
-        Some(record)
-    }
-
-    /// Returns the task ID for the scan/query.
-    pub fn task_id(&self) -> u64 {
-        self.task_id.load(Ordering::Relaxed) as u64
-    }
-
-    #[doc(hidden)]
-    pub fn signal_end(&self) {
-        if self.instances.fetch_sub(1, Ordering::Relaxed) == 1 {
-            self.close()
-        };
+        (tx, RecordSet(rx))
     }
 }
 
-impl<'a> Iterator for &'a Recordset {
+impl Stream for RecordSet {
     type Item = Result<Record>;
 
-    fn next(&mut self) -> Option<Result<Record>> {
-        loop {
-            if self.is_active() || !self.record_queue.is_empty() {
-                let result = self.record_queue.pop().ok();
-                if result.is_some() {
-                    self.record_queue_count.fetch_sub(1, Ordering::Relaxed);
-                    return result;
-                }
-                thread::yield_now();
-                continue;
-            } else {
-                return None;
-            }
-        }
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        // switch to pin-project at some point
+        let rx = unsafe { self.map_unchecked_mut(|this| &mut this.0) };
+        rx.poll_next(cx)
     }
 }

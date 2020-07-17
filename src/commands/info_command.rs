@@ -13,10 +13,13 @@
 // License for the specific language governing permissions and limitations under
 // the License.
 
-use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
 use std::collections::HashMap;
 use std::io::{Cursor, Write};
 use std::str;
+
+use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
+use tracing::debug;
+use error_chain::bail;
 
 use crate::errors::Result;
 use crate::net::Connection;
@@ -27,11 +30,11 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn info(conn: &mut Connection, commands: &[&str]) -> Result<HashMap<String, String>> {
+    pub async fn info(conn: &mut Connection, commands: &[&str]) -> Result<HashMap<String, String>> {
         let cmd = commands.join("\n") + "\n";
         let mut msg = Message::new(&cmd.into_bytes())?;
 
-        msg.send(conn)?;
+        msg.send(conn).await?;
         Ok(msg.parse_response()?)
     }
 
@@ -55,18 +58,20 @@ impl Message {
         rdr.read_u64::<NetworkEndian>().unwrap()
     }
 
-    fn send(&mut self, conn: &mut Connection) -> Result<()> {
-        conn.write(&self.buf)?;
+    async fn send(&mut self, conn: &mut Connection) -> Result<()> {
+        println!("info: sending...");
+        conn.write(&self.buf).await?;
 
         // read the header
-        conn.read(self.buf[..8].as_mut())?;
+        conn.read(self.buf[..8].as_mut()).await?;
 
         // figure our message size and grow the buffer if necessary
         let data_len = self.data_len() as usize;
         self.buf.resize(data_len, 0);
 
+        println!("info: reading {} byte payload...", data_len);
         // read the message content
-        conn.read(self.buf.as_mut())?;
+        conn.read(self.buf.as_mut()).await?;
 
         Ok(())
     }

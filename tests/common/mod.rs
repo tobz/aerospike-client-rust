@@ -16,13 +16,15 @@
 #![allow(dead_code)]
 
 use std::env;
-use std::sync::Arc;
+use std::future::Future;
 
 use rand;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
 
-use aerospike::{Client, ClientPolicy};
+use aerospike::{Result, Client, ClientPolicy};
+
+use tokio::runtime::Builder;
 
 lazy_static! {
     static ref AEROSPIKE_HOSTS: String =
@@ -39,8 +41,6 @@ lazy_static! {
         policy.cluster_name = AEROSPIKE_CLUSTER.clone();
         policy
     };
-    static ref GLOBAL_CLIENT: Arc<Client> =
-        { Arc::new(Client::new(&GLOBAL_CLIENT_POLICY, &*AEROSPIKE_HOSTS).unwrap()) };
 }
 
 pub fn hosts() -> &'static str {
@@ -55,11 +55,23 @@ pub fn client_policy() -> &'static ClientPolicy {
     &*GLOBAL_CLIENT_POLICY
 }
 
-pub fn client() -> Arc<Client> {
-    GLOBAL_CLIENT.clone()
+pub async fn client() -> Result<Client> {
+    Client::new(&GLOBAL_CLIENT_POLICY, &*AEROSPIKE_HOSTS).await
 }
 
 pub fn rand_str(sz: usize) -> String {
     let rng = rand::thread_rng();
     rng.sample_iter(&Alphanumeric).take(sz).collect()
+}
+
+pub fn run_on_current_thread<F>(f: F) -> F::Output
+where
+    F: Future
+{
+     let mut rt = Builder::new()
+        .basic_scheduler()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async { f.await })
 }

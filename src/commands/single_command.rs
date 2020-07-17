@@ -13,8 +13,11 @@
 // limitations under the License.
 
 use std::sync::Arc;
-use std::thread;
 use std::time::Instant;
+
+use tokio::time::delay_for;
+use error_chain::bail;
+use tracing::warn;
 
 use crate::cluster::partition::Partition;
 use crate::cluster::{Cluster, Node};
@@ -44,7 +47,7 @@ impl<'a> SingleCommand<'a> {
         self.cluster.get_node(&self.partition)
     }
 
-    pub fn empty_socket(conn: &mut Connection) -> Result<()> {
+    pub async fn empty_socket(conn: &mut Connection) -> Result<()> {
         // There should not be any more bytes.
         // Empty the socket to be safe.
         let sz = conn.buffer.read_i64(None)?;
@@ -54,20 +57,23 @@ impl<'a> SingleCommand<'a> {
         // Read remaining message bytes.
         if receive_size > 0 {
             conn.buffer.resize_buffer(receive_size)?;
-            conn.read_buffer(receive_size)?;
+            conn.read_buffer(receive_size).await?;
         }
 
         Ok(())
     }
 
-    // EXECUTE
-    //
-
-    pub fn execute(policy: &dyn Policy, cmd: &'a mut dyn commands::Command) -> Result<()> {
+    pub async fn execute<P, C>(policy: P, cmd: &mut C) -> Result<()>
+    where
+        P: Policy + Send + Sync,
+        C: commands::Command,
+    {
         let mut iterations = 0;
 
         // set timeout outside the loop
+        let timeout = policy.timeout();
         let deadline = policy.deadline();
+        let between = policy.sleep_between_retries();
 
         // Execute command until successful, timed out or maximum iterations have been reached.
         loop {
@@ -85,8 +91,9 @@ impl<'a> SingleCommand<'a> {
 
             // Sleep before trying again, after the first iteration
             if iterations > 1 {
-                if let Some(sleep_between_retries) = policy.sleep_between_retries() {
-                    thread::sleep(sleep_between_retries);
+                if let Some(dur) = between {
+                    println!("sleeping for retry");
+                    delay_for(dur).await;
                 }
             }
 
@@ -100,12 +107,16 @@ impl<'a> SingleCommand<'a> {
             // set command node, so when you return a record it has the node
             let node = match cmd.get_node() {
                 Ok(node) => node,
-                _ => continue, // Node is currently inactive. Retry.
+                _ => {
+                    println!("cmd node unavailable");
+                    continue
+                }, // Node is currently inactive. Retry.
             };
 
-            let mut conn = match node.get_connection(policy.timeout()) {
+            let mut conn = match node.get_connection(timeout).await {
                 Ok(conn) => conn,
                 Err(err) => {
+                    println!("failed to get node connection");
                     warn!("Node {}: {}", node, err);
                     continue;
                 }
@@ -116,23 +127,26 @@ impl<'a> SingleCommand<'a> {
             cmd.write_timeout(&mut conn, policy.timeout())
                 .chain_err(|| "Failed to set timeout for send buffer")?;
 
+            println!("send command iter={}", iterations);
             // Send command.
-            if let Err(err) = cmd.write_buffer(&mut conn) {
+            if let Err(err) = cmd.write_buffer(&mut conn).await {
                 // IO errors are considered temporary anomalies. Retry.
                 // Close socket to flush out possible garbage. Do not put back in pool.
-                conn.invalidate();
+                node.invalidate_connection(conn);
                 warn!("Node {}: {}", node, err);
+                println!("retrying due to error on write_buffer");
                 continue;
             }
 
+            println!("parse results iterations={}", iterations);
             // Parse results.
-            if let Err(err) = cmd.parse_result(&mut conn) {
+            if let Err(err) = cmd.parse_result(&mut conn).await {
                 // close the connection
                 // cancelling/closing the batch/multi commands will return an error, which will
                 // close the connection to throw away its data and signal the server about the
                 // situation. We will not put back the connection in the buffer.
                 if !commands::keep_connection(&err) {
-                    conn.invalidate();
+                    node.invalidate_connection(conn);
                 }
                 return Err(err);
             }

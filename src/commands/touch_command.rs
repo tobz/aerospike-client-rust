@@ -23,6 +23,10 @@ use crate::net::Connection;
 use crate::policy::WritePolicy;
 use crate::{ResultCode, Key};
 
+use async_trait::async_trait;
+use error_chain::bail;
+use tracing::warn;
+
 pub struct TouchCommand<'a> {
     single_command: SingleCommand<'a>,
     policy: &'a WritePolicy,
@@ -36,19 +40,20 @@ impl<'a> TouchCommand<'a> {
         }
     }
 
-    pub fn execute(&mut self) -> Result<()> {
-        SingleCommand::execute(self.policy, self)
+    pub async fn execute(&mut self) -> Result<()> {
+        SingleCommand::execute(self.policy, self).await
     }
 }
 
+#[async_trait]
 impl<'a> Command for TouchCommand<'a> {
     fn write_timeout(&mut self, conn: &mut Connection, timeout: Option<Duration>) -> Result<()> {
         conn.buffer.write_timeout(timeout);
         Ok(())
     }
 
-    fn write_buffer(&mut self, conn: &mut Connection) -> Result<()> {
-        conn.flush()
+    async fn write_buffer(&mut self, conn: &mut Connection) -> Result<()> {
+        conn.flush().await
     }
 
     fn prepare_buffer(&mut self, conn: &mut Connection) -> Result<()> {
@@ -59,9 +64,9 @@ impl<'a> Command for TouchCommand<'a> {
         self.single_command.get_node()
     }
 
-    fn parse_result(&mut self, conn: &mut Connection) -> Result<()> {
+    async fn parse_result(&mut self, conn: &mut Connection) -> Result<()> {
         // Read header.
-        if let Err(err) = conn.read_buffer(buffer::MSG_TOTAL_HEADER_SIZE as usize) {
+        if let Err(err) = conn.read_buffer(buffer::MSG_TOTAL_HEADER_SIZE as usize).await {
             warn!("Parse result error: {}", err);
             return Err(err);
         }
@@ -73,6 +78,6 @@ impl<'a> Command for TouchCommand<'a> {
             bail!(ErrorKind::ServerError(result_code));
         }
 
-        SingleCommand::empty_socket(conn)
+        SingleCommand::empty_socket(conn).await
     }
 }

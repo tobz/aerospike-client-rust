@@ -26,7 +26,7 @@ pub struct ClientPolicy {
 
     /// Initial host connection timeout in milliseconds.  The timeout when opening a connection
     /// to the server host for the first time.
-    pub timeout: Option<Duration>,
+    pub connect_timeout: Option<Duration>,
 
     /// Connection idle timeout. Every time a connection is used, its idle
     /// deadline will be extended by this duration. When this deadline is reached,
@@ -82,7 +82,7 @@ impl Default for ClientPolicy {
     fn default() -> ClientPolicy {
         ClientPolicy {
             user_password: None,
-            timeout: Some(Duration::new(30, 0)),
+            connect_timeout: Some(Duration::new(30, 0)),
             idle_timeout: Some(Duration::new(5, 0)),
             max_conns_per_node: 256,
             conn_pools_per_node: 1,

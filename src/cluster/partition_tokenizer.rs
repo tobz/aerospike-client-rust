@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::vec::Vec;
 
 use parking_lot::RwLock;
+use error_chain::bail;
 
 use crate::cluster::node;
 use crate::cluster::Node;
@@ -37,8 +38,8 @@ pub struct PartitionTokenizer {
 }
 
 impl PartitionTokenizer {
-    pub fn new(conn: &mut Connection) -> Result<Self> {
-        let info_map = Message::info(conn, &[REPLICAS_NAME])?;
+    pub async fn new(conn: &mut Connection) -> Result<Self> {
+        let info_map = Message::info(conn, &[REPLICAS_NAME]).await?;
         if let Some(buf) = info_map.get(REPLICAS_NAME) {
             return Ok(PartitionTokenizer {
                 length: info_map.len(),

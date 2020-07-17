@@ -18,6 +18,8 @@ use crate::query::Filter;
 use crate::Bins;
 use crate::Value;
 
+use error_chain::bail;
+
 #[derive(Clone)]
 pub struct Aggregation {
     pub package_name: String,

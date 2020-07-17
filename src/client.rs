@@ -18,10 +18,9 @@ use std::io::prelude::*;
 use std::path::Path;
 use std::str;
 use std::sync::Arc;
-use std::thread;
 use std::vec::Vec;
 
-use scoped_pool::Pool;
+use error_chain::bail;
 
 use crate::batch::BatchExecutor;
 use crate::cluster::{Cluster, Node};
@@ -33,13 +32,13 @@ use crate::errors::{ErrorKind, Result, ResultExt};
 use crate::net::ToHosts;
 use crate::operations::{Operation, OperationType};
 use crate::policy::{BatchPolicy, ClientPolicy, QueryPolicy, ReadPolicy, ScanPolicy, WritePolicy};
-use crate::{BatchRead, Bin, Bins, CollectionIndexType, IndexType, Key, Record, Recordset, ResultCode, Statement, Value, UDFLang};
+use crate::{BatchRead, Bin, Bins, CollectionIndexType, IndexType, Key, Record, RecordSet, ResultCode, Statement, Value, UDFLang};
 
 /// Instantiate a Client instance to access an Aerospike database cluster and perform database
 /// operations.
 ///
 /// The client is thread-safe. Only one client instance should be used per cluster. Multiple
-/// threads should share this cluster instance.
+/// tasks should share this cluster instance.
 ///
 /// Your application uses this class' API to perform database operations such as writing and
 /// reading records, and selecting sets of records. Write operations include specialized
@@ -50,7 +49,6 @@ use crate::{BatchRead, Bin, Bins, CollectionIndexType, IndexType, Key, Record, R
 /// relevant subset of bins.
 pub struct Client {
     cluster: Arc<Cluster>,
-    thread_pool: Pool,
 }
 
 unsafe impl Send for Client {}
@@ -86,25 +84,26 @@ impl Client {
     ///
     /// ```rust
     /// use aerospike::{Client, ClientPolicy};
-    ///
+    /// 
+    /// # #[tokio::main(max_threads = 1)]
+    /// # async fn main() {
     /// let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
-    /// let client = Client::new(&ClientPolicy::default(), &hosts).unwrap();
+    /// let client = Client::new(&ClientPolicy::default(), &hosts).await
+    ///     .expect("failed to create client");
+    /// # }
     /// ```
-    pub fn new(policy: &ClientPolicy, hosts: &dyn ToHosts) -> Result<Self> {
+    pub async fn new(policy: &ClientPolicy, hosts: &dyn ToHosts) -> Result<Self> {
         let hosts = hosts.to_hosts()?;
-        let cluster = Cluster::new(policy.clone(), &hosts)?;
-        let thread_pool = Pool::new(policy.thread_pool_size);
+        let cluster = Cluster::new(policy.clone(), &hosts).await?;
 
         Ok(Client {
             cluster,
-            thread_pool,
         })
     }
 
     /// Closes the connection to the Aerospike cluster.
     pub fn close(&self) -> Result<()> {
         self.cluster.close()?;
-        self.thread_pool.shutdown();
         Ok(())
     }
 
@@ -142,11 +141,14 @@ impl Client {
     ///
     /// ```rust
     /// # use aerospike::*;
-    ///
-    /// # let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
-    /// # let client = Client::new(&ClientPolicy::default(), &hosts).unwrap();
+    /// # #[tokio::main(max_threads = 1)]
+    /// # async fn main() {
+    /// let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
+    /// let client = Client::new(&ClientPolicy::default(), &hosts).await
+    ///     .expect("failed to create client");
+    /// 
     /// let key = as_key!("test", "test", "mykey");
-    /// match client.get(&ReadPolicy::default(), &key, ["a", "b"]) {
+    /// match client.get(&ReadPolicy::default(), &key, ["a", "b"]).await {
     ///     Ok(record)
     ///         => println!("a={:?}", record.bins.get("a")),
     ///     Err(Error(ErrorKind::ServerError(ResultCode::KeyNotFoundError), _))
@@ -154,17 +156,21 @@ impl Client {
     ///     Err(err)
     ///         => println!("Error fetching record: {}", err),
     /// }
+    /// # }
     /// ```
     ///
     /// Determine the remaining time-to-live of a record.
     ///
     /// ```rust
     /// # use aerospike::*;
-    ///
-    /// # let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
-    /// # let client = Client::new(&ClientPolicy::default(), &hosts).unwrap();
+    /// # #[tokio::main(max_threads = 1)]
+    /// # async fn main() {
+    /// let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
+    /// let client = Client::new(&ClientPolicy::default(), &hosts).await
+    ///     .expect("failed to create client");
+    /// 
     /// let key = as_key!("test", "test", "mykey");
-    /// match client.get(&ReadPolicy::default(), &key, Bins::None) {
+    /// match client.get(&ReadPolicy::default(), &key, Bins::None).await {
     ///     Ok(record) => {
     ///         match record.time_to_live() {
     ///             None => println!("record never expires"),
@@ -176,14 +182,15 @@ impl Client {
     ///     Err(err)
     ///         => println!("Error fetching record: {}", err),
     /// }
+    /// # }
     /// ```
-    pub fn get<T>(&self, policy: &ReadPolicy, key: &Key, bins: T) -> Result<Record>
+    pub async fn get<T>(&self, policy: &ReadPolicy, key: &Key, bins: T) -> Result<Record>
     where
         T: Into<Bins>,
     {
         let bins = bins.into();
         let mut command = ReadCommand::new(policy, self.cluster.clone(), key, bins);
-        command.execute()?;
+        command.execute().await?;
         Ok(command.record.unwrap())
     }
 
@@ -199,16 +206,19 @@ impl Client {
     ///
     /// ```rust
     /// # use aerospike::*;
-    ///
-    /// # let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
-    /// # let client = Client::new(&ClientPolicy::default(), &hosts).unwrap();
+    /// # #[tokio::main(max_threads = 1)]
+    /// # async fn main() {
+    /// let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
+    /// let client = Client::new(&ClientPolicy::default(), &hosts).await
+    ///     .expect("failed to create client");
+    /// 
     /// let bins = Bins::from(["name", "age"]);
     /// let mut batch_reads = vec![];
     /// for i in 0..10 {
     ///   let key = as_key!("test", "test", i);
     ///   batch_reads.push(BatchRead::new(key, &bins));
     /// }
-    /// match client.batch_get(&BatchPolicy::default(), batch_reads) {
+    /// match client.batch_get(&BatchPolicy::default(), batch_reads).await {
     ///     Ok(results) => {
     ///       for result in results {
     ///         match result.record {
@@ -217,17 +227,17 @@ impl Client {
     ///         }
     ///       }
     ///     }
-    ///     Err(err)
-    ///         => println!("Error executing batch request: {}", err),
+    ///     Err(err) => println!("Error executing batch request: {}", err),
     /// }
+    /// # }
     /// ```
-    pub fn batch_get<'a>(
+    pub async fn batch_get(
         &self,
         policy: &BatchPolicy,
-        batch_reads: Vec<BatchRead<'a>>,
-    ) -> Result<Vec<BatchRead<'a>>> {
-        let executor = BatchExecutor::new(self.cluster.clone(), self.thread_pool.clone());
-        executor.execute_batch_read(policy, batch_reads)
+        batch_reads: Vec<BatchRead>,
+    ) -> Result<Vec<BatchRead>> {
+        let executor = BatchExecutor::new(self.cluster.clone());
+        executor.execute_batch_read(policy, batch_reads).await
     }
 
     /// Write record bin(s). The policy specifies the transaction timeout, record expiration and
@@ -239,34 +249,42 @@ impl Client {
     ///
     /// ```rust
     /// # use aerospike::*;
-    ///
-    /// # let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
-    /// # let client = Client::new(&ClientPolicy::default(), &hosts).unwrap();
+    /// # #[tokio::main(max_threads = 1)]
+    /// # async fn main() {
+    /// let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
+    /// let client = Client::new(&ClientPolicy::default(), &hosts).await
+    ///     .expect("failed to create client");
+    /// 
     /// let key = as_key!("test", "test", "mykey");
     /// let bin = as_bin!("i", 42);
-    /// match client.put(&WritePolicy::default(), &key, &vec![&bin]) {
+    /// match client.put(&WritePolicy::default(), &key, &vec![&bin]).await  {
     ///     Ok(()) => println!("Record written"),
     ///     Err(err) => println!("Error writing record: {}", err),
     /// }
+    /// # }
     /// ```
     ///
     /// Write a record with an expiration of 10 seconds.
     ///
     /// ```rust
     /// # use aerospike::*;
-    ///
-    /// # let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
-    /// # let client = Client::new(&ClientPolicy::default(), &hosts).unwrap();
+    /// # #[tokio::main(max_threads = 1)]
+    /// # async fn main() {
+    /// let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
+    /// let client = Client::new(&ClientPolicy::default(), &hosts).await
+    ///     .expect("failed to create client");
+    /// 
     /// let key = as_key!("test", "test", "mykey");
     /// let bin = as_bin!("i", 42);
     /// let mut policy = WritePolicy::default();
     /// policy.expiration = policy::Expiration::Seconds(10);
-    /// match client.put(&policy, &key, &vec![&bin]) {
+    /// match client.put(&policy, &key, &vec![&bin]).await {
     ///     Ok(()) => println!("Record written"),
     ///     Err(err) => println!("Error writing record: {}", err),
     /// }
+    /// # }
     /// ```
-    pub fn put<'a, 'b, A: AsRef<Bin<'b>>>(
+    pub async fn put<'a, A: AsRef<Bin<'a>> + Send + Sync>(
         &self,
         policy: &'a WritePolicy,
         key: &'a Key,
@@ -279,7 +297,7 @@ impl Client {
             bins,
             OperationType::Write,
         );
-        command.execute()
+        command.execute().await
     }
 
     /// Add integer bin values to existing record bin values. The policy specifies the transaction
@@ -292,19 +310,23 @@ impl Client {
     ///
     /// ```rust
     /// # use aerospike::*;
-    ///
-    /// # let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
-    /// # let client = Client::new(&ClientPolicy::default(), &hosts).unwrap();
+    /// # #[tokio::main(max_threads = 1)]
+    /// # async fn main() {
+    /// let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
+    /// let client = Client::new(&ClientPolicy::default(), &hosts).await
+    ///     .expect("failed to create client");
+    /// 
     /// let key = as_key!("test", "test", "mykey");
     /// let bina = as_bin!("a", 1);
     /// let binb = as_bin!("b", 2);
     /// let bins = vec![&bina, &binb];
-    /// match client.add(&WritePolicy::default(), &key, &bins) {
+    /// match client.add(&WritePolicy::default(), &key, &bins).await  {
     ///     Ok(()) => println!("Record updated"),
     ///     Err(err) => println!("Error writing record: {}", err),
     /// }
+    /// # }
     /// ```
-    pub fn add<'a, 'b, A: AsRef<Bin<'b>>>(
+    pub async fn add<'a, A: AsRef<Bin<'a>> + Send + Sync>(
         &self,
         policy: &'a WritePolicy,
         key: &'a Key,
@@ -312,13 +334,13 @@ impl Client {
     ) -> Result<()> {
         let mut command =
             WriteCommand::new(policy, self.cluster.clone(), key, bins, OperationType::Incr);
-        command.execute()
+        command.execute().await
     }
 
     /// Append bin string values to existing record bin values. The policy specifies the
     /// transaction timeout, record expiration and how the transaction is handled when the record
     /// already exists. This call only works for string values.
-    pub fn append<'a, 'b, A: AsRef<Bin<'b>>>(
+    pub async fn append<'a, A: AsRef<Bin<'a>> + Send + Sync>(
         &self,
         policy: &'a WritePolicy,
         key: &'a Key,
@@ -331,13 +353,13 @@ impl Client {
             bins,
             OperationType::Append,
         );
-        command.execute()
+        command.execute().await
     }
 
     /// Prepend bin string values to existing record bin values. The policy specifies the
     /// transaction timeout, record expiration and how the transaction is handled when the record
     /// already exists. This call only works for string values.
-    pub fn prepend<'a, 'b, A: AsRef<Bin<'b>>>(
+    pub async fn prepend<'a, A: AsRef<Bin<'a>> + Send + Sync>(
         &self,
         policy: &'a WritePolicy,
         key: &'a Key,
@@ -350,7 +372,7 @@ impl Client {
             bins,
             OperationType::Prepend,
         );
-        command.execute()
+        command.execute().await
     }
 
     /// Delete record for specified key. The policy specifies the transaction timeout.
@@ -362,19 +384,23 @@ impl Client {
     ///
     /// ```rust
     /// # use aerospike::*;
-    ///
-    /// # let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
-    /// # let client = Client::new(&ClientPolicy::default(), &hosts).unwrap();
+    /// # #[tokio::main(max_threads = 1)]
+    /// # async fn main() {
+    /// let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
+    /// let client = Client::new(&ClientPolicy::default(), &hosts).await
+    ///     .expect("failed to create client");
+    /// 
     /// let key = as_key!("test", "test", "mykey");
-    /// match client.delete(&WritePolicy::default(), &key) {
+    /// match client.delete(&WritePolicy::default(), &key).await {
     ///     Ok(true) => println!("Record deleted"),
     ///     Ok(false) => println!("Record did not exist"),
     ///     Err(err) => println!("Error deleting record: {}", err),
     /// }
+    /// # }
     /// ```
-    pub fn delete(&self, policy: &WritePolicy, key: &Key) -> Result<bool> {
+    pub async fn delete(&self, policy: &WritePolicy, key: &Key) -> Result<bool> {
         let mut command = DeleteCommand::new(policy, self.cluster.clone(), key);
-        command.execute()?;
+        command.execute().await?;
         Ok(command.existed)
     }
 
@@ -387,26 +413,30 @@ impl Client {
     ///
     /// ```rust
     /// # use aerospike::*;
-    ///
-    /// # let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
-    /// # let client = Client::new(&ClientPolicy::default(), &hosts).unwrap();
+    /// # #[tokio::main(max_threads = 1)]
+    /// # async fn main() {
+    /// let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
+    /// let client = Client::new(&ClientPolicy::default(), &hosts).await
+    ///     .expect("failed to create client");
+    /// 
     /// let key = as_key!("test", "test", "mykey");
     /// let mut policy = WritePolicy::default();
     /// policy.expiration = policy::Expiration::NamespaceDefault;
-    /// match client.touch(&policy, &key) {
+    /// match client.touch(&policy, &key).await {
     ///     Ok(()) => println!("Record expiration updated"),
     ///     Err(err) => println!("Error writing record: {}", err),
     /// }
+    /// # }
     /// ```
-    pub fn touch(&self, policy: &WritePolicy, key: &Key) -> Result<()> {
+    pub async fn touch(&self, policy: &WritePolicy, key: &Key) -> Result<()> {
         let mut command = TouchCommand::new(policy, self.cluster.clone(), key);
-        command.execute()
+        command.execute().await
     }
 
     /// Determine if a record key exists. The policy can be used to specify timeouts.
-    pub fn exists(&self, policy: &WritePolicy, key: &Key) -> Result<bool> {
+    pub async fn exists(&self, policy: &WritePolicy, key: &Key) -> Result<bool> {
         let mut command = ExistsCommand::new(policy, self.cluster.clone(), key);
-        command.execute()?;
+        command.execute().await?;
         Ok(command.exists)
     }
 
@@ -423,23 +453,27 @@ impl Client {
     ///
     /// ```rust
     /// # use aerospike::*;
-    ///
-    /// # let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
-    /// # let client = Client::new(&ClientPolicy::default(), &hosts).unwrap();
+    /// # #[tokio::main(max_threads = 1)]
+    /// # async fn main() {
+    /// let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
+    /// let client = Client::new(&ClientPolicy::default(), &hosts).await
+    ///     .expect("failed to create client");
+    /// 
     /// let key = as_key!("test", "test", "mykey");
     /// let bin = as_bin!("a", 42);
     /// let ops = vec![
     ///     operations::add(&bin),
     ///     operations::get_bin("a"),
     /// ];
-    /// match client.operate(&WritePolicy::default(), &key, &ops) {
+    /// match client.operate(&WritePolicy::default(), &key, &ops).await  {
     ///     Ok(record) => println!("The new value is {}", record.bins.get("a").unwrap()),
     ///     Err(err) => println!("Error writing record: {}", err),
     /// }
+    /// # }
     /// ```
-    pub fn operate(&self, policy: &WritePolicy, key: &Key, ops: &[Operation]) -> Result<Record> {
+    pub async fn operate(&self, policy: &WritePolicy, key: &Key, ops: &[Operation<'_>]) -> Result<Record> {
         let mut command = OperateCommand::new(policy, self.cluster.clone(), key, ops);
-        command.execute()?;
+        command.execute().await?;
         Ok(command.read_command.record.unwrap())
     }
 
@@ -453,11 +487,13 @@ impl Client {
     /// # Examples
     ///
     /// ```rust
-    /// # extern crate aerospike;
     /// # use aerospike::*;
-    ///
-    /// # let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
-    /// # let client = Client::new(&ClientPolicy::default(), &hosts).unwrap();
+    /// # #[tokio::main(max_threads = 1)]
+    /// # async fn main() {
+    /// let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
+    /// let client = Client::new(&ClientPolicy::default(), &hosts).await
+    ///     .expect("failed to create client");
+    /// 
     /// let code = r#"
     /// -- Validate value before writing.
     /// function writeWithValidation(r,name,value)
@@ -482,10 +518,11 @@ impl Client {
     /// end
     /// "#;
     ///
-    /// client.register_udf(&WritePolicy::default(), code.as_bytes(),
-    ///                     "example.lua", UDFLang::Lua).unwrap();
+    /// client.register_udf(&WritePolicy::default(), code.as_bytes(), "example.lua", UDFLang::Lua).await
+    ///     .expect("failed to register UDF");
+    /// # }
     /// ```
-    pub fn register_udf(
+    pub async fn register_udf(
         &self,
         policy: &WritePolicy,
         udf_body: &[u8],
@@ -502,7 +539,7 @@ impl Client {
             language
         );
         let node = self.cluster.get_random_node()?;
-        let response = node.info(policy.base_policy.timeout, &[&cmd])?;
+        let response = node.info(policy.base_policy.timeout, &[&cmd]).await?;
 
         if let Some(msg) = response.get("error") {
             let msg = base64::decode(msg)?;
@@ -525,7 +562,7 @@ impl Client {
     /// to all other cluster nodes automatically.
     ///
     /// Lua is the only supported scripting laungauge for UDFs at the moment.
-    pub fn register_udf_from_file(
+    pub async fn register_udf_from_file(
         &self,
         policy: &WritePolicy,
         client_path: &str,
@@ -537,11 +574,11 @@ impl Client {
         let mut udf_body: Vec<u8> = vec![];
         file.read_to_end(&mut udf_body)?;
 
-        self.register_udf(policy, &udf_body, udf_name, language)
+        self.register_udf(policy, &udf_body, udf_name, language).await
     }
 
     /// Remove a user-defined function (UDF) module from the server.
-    pub fn remove_udf(
+    pub async fn remove_udf(
         &self,
         policy: &WritePolicy,
         udf_name: &str,
@@ -549,7 +586,7 @@ impl Client {
     ) -> Result<()> {
         let cmd = format!("udf-remove:filename={}.{};", udf_name, language);
         let node = self.cluster.get_random_node()?;
-        let response = node.info(policy.base_policy.timeout, &[&cmd])?;
+        let response = node.info(policy.base_policy.timeout, &[&cmd]).await?;
 
         if response.get("ok").is_some() {
             return Ok(());
@@ -560,7 +597,7 @@ impl Client {
 
     /// Execute a user-defined function on the server and return the results. The function operates
     /// on a single record. The UDF package name is required to locate the UDF.
-    pub fn execute_udf(
+    pub async fn execute_udf(
         &self,
         policy: &WritePolicy,
         key: &Key,
@@ -576,7 +613,7 @@ impl Client {
             function_name,
             args,
         );
-        command.execute()?;
+        command.execute().await?;
 
         let record = command.read_command.record.unwrap();
 
@@ -605,15 +642,18 @@ impl Client {
     /// # Examples
     ///
     /// ```rust
-    /// # extern crate aerospike;
     /// # use aerospike::*;
+    /// # use tokio::stream::StreamExt;
+    /// # #[tokio::main(max_threads = 1)]
+    /// # async fn main() {
+    /// let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
+    /// let client = Client::new(&ClientPolicy::default(), &hosts).await
+    ///     .expect("failed to create client");
     ///
-    /// # let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
-    /// # let client = Client::new(&ClientPolicy::default(), &hosts).unwrap();
-    /// match client.scan(&ScanPolicy::default(), "test", "demo", Bins::All) {
-    ///     Ok(records) => {
-    ///         let mut count = 0;
-    ///         for record in &*records {
+    /// match client.scan(&ScanPolicy::default(), "test", "demo", Bins::All).await {
+    ///     Ok(mut records) => {
+    ///         let mut count: u64 = 0;
+    ///         while let Some(record) = records.next().await {
     ///             match record {
     ///                 Ok(record) => count += 1,
     ///                 Err(err) => panic!("Error executing scan: {}", err),
@@ -623,35 +663,35 @@ impl Client {
     ///     },
     ///     Err(err) => println!("Failed to execute scan: {}", err),
     /// }
+    /// # }
     /// ```
-    pub fn scan<T>(
+    pub async fn scan<T>(
         &self,
         policy: &ScanPolicy,
         namespace: &str,
         set_name: &str,
         bins: T,
-    ) -> Result<Arc<Recordset>>
+    ) -> Result<RecordSet>
     where
         T: Into<Bins>,
     {
         let bins = bins.into();
         let nodes = self.cluster.nodes();
-        let recordset = Arc::new(Recordset::new(policy.record_queue_size, nodes.len()));
+        let (tx, rx) = RecordSet::new(policy.record_queue_size);
         for node in nodes {
             let node = node.clone();
-            let recordset = recordset.clone();
+            let tx = tx.clone();
             let policy = policy.to_owned();
             let namespace = namespace.to_owned();
             let set_name = set_name.to_owned();
             let bins = bins.clone();
 
-            thread::spawn(move || {
-                let mut command =
-                    ScanCommand::new(&policy, node, &namespace, &set_name, bins, recordset);
-                command.execute().unwrap();
+            tokio::spawn(async move {
+                let mut command = ScanCommand::new(&policy, node, &namespace, &set_name, bins, tx);
+                command.execute().await.unwrap();
             });
         }
-        Ok(recordset)
+        Ok(rx)
     }
 
     /// Read all records in the specified namespace and set for one node only and return a record
@@ -659,31 +699,29 @@ impl Client {
     /// concurrently pops records off the queue through the record iterator. Up to
     /// `policy.max_concurrent_nodes` nodes are scanned in parallel. If concurrent nodes is set to
     /// zero, the server nodes are read in series.
-    pub fn scan_node<T>(
+    pub async fn scan_node<T>(
         &self,
         policy: &ScanPolicy,
         node: Arc<Node>,
         namespace: &str,
         set_name: &str,
         bins: T,
-    ) -> Result<Arc<Recordset>>
+    ) -> Result<RecordSet>
     where
         T: Into<Bins>,
     {
         let bins = bins.into();
-        let recordset = Arc::new(Recordset::new(policy.record_queue_size, 1));
-        let t_recordset = recordset.clone();
+        let (tx, rx) = RecordSet::new(policy.record_queue_size);
         let policy = policy.to_owned();
         let namespace = namespace.to_owned();
         let set_name = set_name.to_owned();
 
-        self.thread_pool.spawn(move || {
-            let mut command =
-                ScanCommand::new(&policy, node, &namespace, &set_name, bins, t_recordset);
-            command.execute().unwrap();
+        tokio::spawn(async move {
+            let mut command = ScanCommand::new(&policy, node, &namespace, &set_name, bins, tx);
+            command.execute().await.unwrap();
         });
 
-        Ok(recordset)
+        Ok(rx)
     }
 
     /// Execute a query on all server nodes and return a record iterator. The query executor puts
@@ -693,63 +731,65 @@ impl Client {
     /// # Examples
     ///
     /// ```rust
-    /// # extern crate aerospike;
     /// # use aerospike::*;
-    ///
-    /// # let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
-    /// # let client = Client::new(&ClientPolicy::default(), &hosts).unwrap();
+    /// # use tokio::stream::StreamExt;
+    /// # #[tokio::main(max_threads = 1)]
+    /// # async fn main() {
+    /// let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
+    /// let client = Client::new(&ClientPolicy::default(), &hosts).await
+    ///     .expect("failed to create client");
+    /// 
     /// let stmt = Statement::new("test", "test", Bins::All);
-    /// match client.query(&QueryPolicy::default(), stmt) {
-    ///     Ok(records) => {
-    ///         for record in &*records {
+    /// match client.query(&QueryPolicy::default(), stmt).await {
+    ///     Ok(mut records) => {
+    ///         while let Some(record) = records.next().await {
     ///             // .. process record
     ///         }
     ///     },
     ///     Err(err) => println!("Error fetching record: {}", err),
     /// }
+    /// # }
     /// ```
-    pub fn query(&self, policy: &QueryPolicy, statement: Statement) -> Result<Arc<Recordset>> {
+    pub async fn query(&self, policy: &QueryPolicy, statement: Statement) -> Result<RecordSet> {
         statement.validate()?;
         let statement = Arc::new(statement);
 
         let nodes = self.cluster.nodes();
-        let recordset = Arc::new(Recordset::new(policy.record_queue_size, nodes.len()));
+        let (tx, rx) = RecordSet::new(policy.record_queue_size);
         for node in nodes {
             let node = node.clone();
-            let t_recordset = recordset.clone();
+            let tx = tx.clone();
             let policy = policy.to_owned();
             let statement = statement.clone();
 
-            self.thread_pool.spawn(move || {
-                let mut command = QueryCommand::new(&policy, node, statement, t_recordset);
-                command.execute().unwrap();
+            tokio::spawn(async move {
+                let mut command = QueryCommand::new(&policy, node, statement, tx);
+                command.execute().await.unwrap();
             });
         }
-        Ok(recordset)
+        Ok(rx)
     }
 
     /// Execute a query on a single server node and return a record iterator. The query executor
     /// puts records on a queue in separate threads. The calling thread concurrently pops records
     /// off the queue through the record iterator.
-    pub fn query_node(
+    pub async fn query_node(
         &self,
         policy: &QueryPolicy,
         node: Arc<Node>,
         statement: Statement,
-    ) -> Result<Arc<Recordset>> {
+    ) -> Result<RecordSet> {
         statement.validate()?;
 
-        let recordset = Arc::new(Recordset::new(policy.record_queue_size, 1));
-        let t_recordset = recordset.clone();
+        let (tx, rx) = RecordSet::new(policy.record_queue_size);
         let policy = policy.to_owned();
         let statement = Arc::new(statement);
 
-        self.thread_pool.spawn(move || {
-            let mut command = QueryCommand::new(&policy, node, statement, t_recordset);
-            command.execute().unwrap();
-        });
-
-        Ok(recordset)
+        tokio::spawn(async move {
+            let mut command = QueryCommand::new(&policy, node, statement, tx);
+            command.execute().await?;
+            Ok(rx)
+        }).await?
     }
 
     /// Removes all records in the specified namespace/set efficiently.
@@ -764,7 +804,7 @@ impl Client {
     /// zero, only records with a lut less than `before_nanos` are deleted. Units are in
     /// nanoseconds since unix epoch (1970-01-01). Pass in zero to delete all records in the
     /// namespace/set recardless of last update time.
-    pub fn truncate(
+    pub async fn truncate(
         &self,
         policy: &WritePolicy,
         namespace: &str,
@@ -785,7 +825,7 @@ impl Client {
             cmd.push_str(&format!("{}", before_nanos));
         }
 
-        self.send_info_cmd(&cmd, policy)
+        self.send_info_cmd(&cmd, policy).await
             .chain_err(|| "Error truncating ns/set")
     }
 
@@ -798,18 +838,21 @@ impl Client {
     /// within set `bar` and bin `baz`:
     ///
     /// ```rust
-    /// # extern crate aerospike;
     /// # use aerospike::*;
+    /// # #[tokio::main(max_threads = 1)]
+    /// # async fn main() {
+    /// let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
+    /// let client = Client::new(&ClientPolicy::default(), &hosts).await
+    ///     .expect("failed to create client");
     ///
-    /// # let hosts = std::env::var("AEROSPIKE_HOSTS").unwrap();
-    /// # let client = Client::new(&ClientPolicy::default(), &hosts).unwrap();
     /// match client.create_index(&WritePolicy::default(), "foo", "bar", "baz",
-    ///     "idx_foo_bar_baz", IndexType::Numeric) {
+    ///     "idx_foo_bar_baz", IndexType::Numeric).await {
     ///     Err(err) => println!("Failed to create index: {}", err),
     ///     _ => {}
     /// }
+    /// # }
     /// ```
-    pub fn create_index(
+    pub async fn create_index(
         &self,
         policy: &WritePolicy,
         namespace: &str,
@@ -826,13 +869,13 @@ impl Client {
             index_name,
             index_type,
             CollectionIndexType::Default,
-        )
+        ).await
     }
 
     /// Create a complex secondary index on a bin containing scalar, list or map values. This
     /// asynchronous server call returns before the command is complete.
     #[allow(clippy::too_many_arguments)]
-    pub fn create_complex_index(
+    pub async fn create_complex_index(
         &self,
         policy: &WritePolicy,
         namespace: &str,
@@ -852,12 +895,12 @@ impl Client {
              priority=normal",
             namespace, set_name, index_name, cit_str, bin_name, index_type
         );
-        self.send_info_cmd(&cmd, policy)
+        self.send_info_cmd(&cmd, policy).await
             .chain_err(|| "Error creating index")
     }
 
     /// Delete secondary index.
-    pub fn drop_index(
+    pub async fn drop_index(
         &self,
         policy: &WritePolicy,
         namespace: &str,
@@ -873,13 +916,13 @@ impl Client {
             "sindex-delete:ns={};{}indexname={}",
             namespace, set_name, index_name
         );
-        self.send_info_cmd(&cmd, policy)
+        self.send_info_cmd(&cmd, policy).await
             .chain_err(|| "Error dropping index")
     }
 
-    fn send_info_cmd(&self, cmd: &str, policy: &WritePolicy) -> Result<()> {
+    async fn send_info_cmd(&self, cmd: &str, policy: &WritePolicy) -> Result<()> {
         let node = self.cluster.get_random_node()?;
-        let response = node.info(policy.base_policy.timeout, &[cmd])?;
+        let response = node.info(policy.base_policy.timeout, &[cmd]).await?;
 
         if let Some(v) = response.values().next() {
             if v.to_uppercase() == "OK" {

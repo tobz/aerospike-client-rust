@@ -18,7 +18,7 @@
 
 pub use self::filter::Filter;
 pub use self::index_types::{CollectionIndexType, IndexType};
-pub use self::recordset::Recordset;
+pub use self::recordset::{RecordSet, RecordSender};
 pub use self::statement::Statement;
 pub use self::udf::UDFLang;
 

@@ -20,14 +20,15 @@ pub mod partition_tokenizer;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
-use std::sync::mpsc;
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration};
 use std::vec::Vec;
 
 use parking_lot::{Mutex, RwLock};
+use tokio::{select, sync::oneshot, time::{Instant, delay_until, delay_for}};
+
+use error_chain::bail;
+use tracing::{debug, error, warn, info};
 
 pub use self::node::Node;
 
@@ -44,7 +45,7 @@ use crate::policy::ClientPolicy;
 #[derive(Debug)]
 pub struct Cluster {
     // Initial host nodes specified by user.
-    seeds: Arc<RwLock<Vec<Host>>>,
+    seeds: Vec<Host>,
 
     // All aliases for all nodes in cluster.
     aliases: Arc<RwLock<HashMap<Host, Arc<Node>>>>,
@@ -60,29 +61,29 @@ pub struct Cluster {
 
     client_policy: ClientPolicy,
 
-    tend_channel: Mutex<Sender<()>>,
+    tend_channel: Mutex<Option<oneshot::Sender<()>>>,
     closed: AtomicBool,
 }
 
 impl Cluster {
-    pub fn new(policy: ClientPolicy, hosts: &[Host]) -> Result<Arc<Self>> {
-        let (tx, rx): (Sender<()>, Receiver<()>) = mpsc::channel();
+    pub async fn new(policy: ClientPolicy, hosts: &[Host]) -> Result<Arc<Self>> {
+        let (tx, rx) = oneshot::channel();
         let cluster = Arc::new(Cluster {
             client_policy: policy,
 
-            seeds: Arc::new(RwLock::new(hosts.to_vec())),
+            seeds: hosts.to_vec(),
             aliases: Arc::new(RwLock::new(HashMap::new())),
             nodes: Arc::new(RwLock::new(vec![])),
 
             partition_write_map: Arc::new(RwLock::new(HashMap::new())),
             node_index: AtomicIsize::new(0),
 
-            tend_channel: Mutex::new(tx),
+            tend_channel: Mutex::new(Some(tx)),
             closed: AtomicBool::new(false),
         });
 
         // try to seed connections for first use
-        Cluster::wait_till_stabilized(cluster.clone())?;
+        Cluster::wait_till_stabilized(&cluster).await?;
 
         // apply policy rules
         if cluster.client_policy.fail_if_not_connected && !cluster.is_connected() {
@@ -95,28 +96,27 @@ impl Cluster {
         }
 
         let cluster_for_tend = cluster.clone();
-        thread::spawn(move || Cluster::tend_thread(cluster_for_tend, rx));
+        tokio::spawn(async move { Cluster::run_tend(cluster_for_tend, rx).await });
 
         debug!("New cluster initialized and ready to be used...");
         Ok(cluster)
     }
 
-    fn tend_thread(cluster: Arc<Cluster>, rx: Receiver<()>) {
+    async fn run_tend(cluster: Arc<Cluster>, mut done: oneshot::Receiver<()>) {
         let tend_interval = cluster.client_policy.tend_interval;
+        let mut next_tend = Instant::now();
 
         loop {
-            // try to read from the receive channel to see if it hung up
-            match rx.try_recv() {
-                Ok(_) => unreachable!(),
-                // signaled to end
-                Err(TryRecvError::Disconnected) => break,
-                Err(TryRecvError::Empty) => {
-                    if let Err(err) = cluster.tend() {
+            let interval = delay_until(next_tend);
+            select! {
+                _ = interval => {
+                    if let Err(err) = cluster.tend().await {
                         log_error_chain!(err, "Error tending cluster");
                     }
 
-                    thread::sleep(tend_interval);
-                }
+                    next_tend = Instant::now() + tend_interval;
+                },
+                _ = &mut done => break,
             }
         }
 
@@ -124,20 +124,20 @@ impl Cluster {
         let nodes = cluster.nodes();
         for mut node in nodes {
             if let Some(node) = Arc::get_mut(&mut node) {
-                node.close();
+                let _ = node.close().await;
             }
         }
         cluster.set_nodes(vec![]);
     }
 
-    fn tend(&self) -> Result<()> {
+    async fn tend(&self) -> Result<()> {
         let mut nodes = self.nodes();
 
         // All node additions/deletions are performed in tend thread.
         // If active nodes don't exist, seed cluster.
         if nodes.is_empty() {
             debug!("No connections available; seeding...");
-            self.seed_nodes();
+            self.seed_nodes().await;
             nodes = self.nodes();
         }
 
@@ -148,7 +148,7 @@ impl Cluster {
         for node in nodes {
             let old_gen = node.partition_generation();
             if node.is_active() {
-                match node.refresh(self.aliases()) {
+                match node.refresh(self.aliases()).await {
                     Ok(friends) => {
                         refresh_count += 1;
 
@@ -157,7 +157,7 @@ impl Cluster {
                         }
 
                         if old_gen != node.partition_generation() {
-                            self.update_partitions(node.clone())?;
+                            self.update_partitions(node.clone()).await?;
                         }
                     }
                     Err(err) => {
@@ -169,50 +169,46 @@ impl Cluster {
         }
 
         // Add nodes in a batch.
-        let add_list = self.find_new_nodes_to_add(friend_list);
+        let add_list = self.find_new_nodes_to_add(friend_list).await;
         self.add_nodes_and_aliases(&add_list);
 
         // IMPORTANT: Remove must come after add to remove aliases
         // Handle nodes changes determined from refreshes.
         // Remove nodes in a batch.
-        let remove_list = self.find_nodes_to_remove(refresh_count);
-        self.remove_nodes_and_aliases(remove_list);
+        let remove_list = self.find_nodes_to_remove(refresh_count).await;
+        let _ = self.remove_nodes_and_aliases(remove_list).await;
 
         Ok(())
     }
 
-    fn wait_till_stabilized(cluster: Arc<Cluster>) -> Result<()> {
+    async fn wait_till_stabilized(cluster: &Cluster) -> Result<()> {
         let timeout = cluster
             .client_policy()
-            .timeout
+            .connect_timeout
             .unwrap_or_else(|| Duration::from_secs(3));
         let deadline = Instant::now() + timeout;
         let sleep_between_tend = Duration::from_millis(1);
 
-        let handle = thread::spawn(move || {
-            let mut count: isize = -1;
-            loop {
-                if Instant::now() > deadline {
-                    break;
-                }
-
-                if let Err(err) = cluster.tend() {
-                    log_error_chain!(err, "Error during initial cluster tend");
-                }
-
-                let old_count = count;
-                count = cluster.nodes().len() as isize;
-                if count == old_count {
-                    break;
-                }
-
-                thread::sleep(sleep_between_tend);
+        let mut count: isize = -1;
+        loop {
+            if Instant::now() > deadline {
+                break;
             }
-        });
 
-        handle
-            .join()
-            .map_err(|err| format!("Error during initial cluster tend: {:?}", err).into())
+            if let Err(err) = cluster.tend().await {
+                log_error_chain!(err, "Error during initial cluster tend");
+            }
+
+            let old_count = count;
+            count = cluster.nodes().len() as isize;
+            if count == old_count {
+                break;
+            }
+
+            delay_for(sleep_between_tend).await;
+        }
+
+        Ok(())
     }
 
     pub const fn cluster_name(&self) -> &Option<String> {
@@ -221,13 +217,6 @@ impl Cluster {
 
     pub const fn client_policy(&self) -> &ClientPolicy {
         &self.client_policy
-    }
-
-    pub fn add_seeds(&self, new_seeds: &[Host]) -> Result<()> {
-        let mut seeds = self.seeds.write();
-        seeds.extend_from_slice(new_seeds);
-
-        Ok(())
     }
 
     pub fn alias_exists(&self, host: &Host) -> Result<bool> {
@@ -244,12 +233,13 @@ impl Cluster {
         self.partition_write_map.clone()
     }
 
-    pub fn update_partitions(&self, node: Arc<Node>) -> Result<()> {
-        let mut conn = node.get_connection(self.client_policy.timeout)?;
-        let tokens = PartitionTokenizer::new(&mut conn).or_else(|e| {
-            conn.invalidate();
-            Err(e)
-        })?;
+    pub async fn update_partitions(&self, node: Arc<Node>) -> Result<()> {
+        let mut conn = node.get_connection(self.client_policy.connect_timeout).await?;
+        let tokens = PartitionTokenizer::new(&mut conn).await
+            .or_else(|e| {
+                node.invalidate_connection(conn);
+                Err(e)
+            })?;
 
         let nmap = tokens.update_partition(self.partitions(), node)?;
         self.set_partitions(nmap);
@@ -257,25 +247,23 @@ impl Cluster {
         Ok(())
     }
 
-    pub fn seed_nodes(&self) -> bool {
-        let seed_array = self.seeds.read();
-
-        info!("Seeding the cluster. Seeds count: {}", seed_array.len());
+    pub async fn seed_nodes(&self) -> bool {
+        info!("Seeding the cluster. Seeds count: {}", self.seeds.len());
 
         let mut list: Vec<Arc<Node>> = vec![];
-        for seed in &*seed_array {
+        for seed in &self.seeds {
             let mut seed_node_validator = NodeValidator::new(self);
-            if let Err(err) = seed_node_validator.validate_node(self, seed) {
+            if let Err(err) = seed_node_validator.validate_node(self, seed).await {
                 log_error_chain!(err, "Failed to validate seed host: {}", seed);
                 continue;
             };
 
-            for alias in &*seed_node_validator.aliases() {
-                let nv = if *seed == *alias {
+            for alias in seed_node_validator.aliases() {
+                let nv = if seed == &alias {
                     seed_node_validator.clone()
                 } else {
                     let mut nv2 = NodeValidator::new(self);
-                    if let Err(err) = nv2.validate_node(self, seed) {
+                    if let Err(err) = nv2.validate_node(self, seed).await {
                         log_error_chain!(err, "Seeding host {} failed with error", alias);
                         continue;
                     };
@@ -301,12 +289,12 @@ impl Cluster {
         list.iter().any(|node| node.name() == name)
     }
 
-    fn find_new_nodes_to_add(&self, hosts: Vec<Host>) -> Vec<Arc<Node>> {
+    async fn find_new_nodes_to_add(&self, hosts: Vec<Host>) -> Vec<Arc<Node>> {
         let mut list: Vec<Arc<Node>> = vec![];
 
         for host in hosts {
             let mut nv = NodeValidator::new(self);
-            if let Err(err) = nv.validate_node(self, &host) {
+            if let Err(err) = nv.validate_node(self, &host).await {
                 log_error_chain!(err, "Adding node {} failed with error", host.name);
                 continue;
             };
@@ -342,7 +330,7 @@ impl Cluster {
         Node::new(self.client_policy.clone(), Arc::new(nv))
     }
 
-    fn find_nodes_to_remove(&self, refresh_count: usize) -> Vec<Arc<Node>> {
+    async fn find_nodes_to_remove(&self, refresh_count: usize) -> Vec<Arc<Node>> {
         let nodes = self.nodes();
         let mut remove_list: Vec<Arc<Node>> = vec![];
         let cluster_size = nodes.len();
@@ -358,7 +346,7 @@ impl Cluster {
                 // Single node clusters rely on whether it responded to info requests.
                 1 if node.failures() > 5 => {
                     // 5 consecutive info requests failed. Try seeds.
-                    if self.seed_nodes() {
+                    if self.seed_nodes().await {
                         remove_list.push(tnode);
                     }
                 }
@@ -397,13 +385,13 @@ impl Cluster {
         self.add_nodes(friend_list);
     }
 
-    fn remove_nodes_and_aliases(&self, mut nodes_to_remove: Vec<Arc<Node>>) {
+    async fn remove_nodes_and_aliases(&self, mut nodes_to_remove: Vec<Arc<Node>>) {
         for node in &mut nodes_to_remove {
             for alias in node.aliases() {
                 self.remove_alias(&alias);
             }
             if let Some(node) = Arc::get_mut(node) {
-                node.close();
+                let _ = node.close().await;
             }
         }
         self.remove_nodes(&nodes_to_remove);
@@ -524,8 +512,10 @@ impl Cluster {
     pub fn close(&self) -> Result<()> {
         if !self.closed.load(Ordering::Relaxed) {
             // close tend by closing the channel
-            let tx = self.tend_channel.lock();
-            drop(tx);
+            let mut tx = self.tend_channel.lock();
+            if let Some(tx) = tx.take() {
+                let _ = tx.send(());
+            }
         }
 
         Ok(())
