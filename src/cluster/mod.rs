@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::{Duration};
 use std::vec::Vec;
 
-use parking_lot::{Mutex, RwLock};
+use std::sync::{Mutex, RwLock};
 use tokio::{select, sync::oneshot, time::{Instant, delay_until, delay_for}};
 
 use error_chain::bail;
