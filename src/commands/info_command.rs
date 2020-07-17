@@ -59,7 +59,6 @@ impl Message {
     }
 
     async fn send(&mut self, conn: &mut Connection) -> Result<()> {
-        println!("info: sending...");
         conn.write(&self.buf).await?;
 
         // read the header
@@ -69,7 +68,6 @@ impl Message {
         let data_len = self.data_len() as usize;
         self.buf.resize(data_len, 0);
 
-        println!("info: reading {} byte payload...", data_len);
         // read the message content
         conn.read(self.buf.as_mut()).await?;
 
