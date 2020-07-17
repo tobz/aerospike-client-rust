@@ -220,12 +220,12 @@ impl Cluster {
     }
 
     pub fn alias_exists(&self, host: &Host) -> Result<bool> {
-        let aliases = self.aliases.read();
+        let aliases = self.aliases.read().unwrap();
         Ok(aliases.contains_key(host))
     }
 
     fn set_partitions(&self, partitions: HashMap<String, Vec<Arc<Node>>>) {
-        let mut partition_map = self.partition_write_map.write();
+        let mut partition_map = self.partition_write_map.write().unwrap();
         *partition_map = partitions;
     }
 
@@ -398,25 +398,25 @@ impl Cluster {
     }
 
     fn add_alias(&self, host: Host, node: Arc<Node>) {
-        let mut aliases = self.aliases.write();
+        let mut aliases = self.aliases.write().unwrap();
         node.add_alias(host.clone());
         aliases.insert(host, node);
     }
 
     fn remove_alias(&self, host: &Host) {
-        let mut aliases = self.aliases.write();
+        let mut aliases = self.aliases.write().unwrap();
         aliases.remove(host);
     }
 
     fn add_aliases(&self, node: Arc<Node>) {
-        let mut aliases = self.aliases.write();
+        let mut aliases = self.aliases.write().unwrap();
         for alias in node.aliases() {
             aliases.insert(alias, node.clone());
         }
     }
 
     fn find_node_in_partition_map(&self, filter: Arc<Node>) -> bool {
-        let partitions = self.partition_write_map.read();
+        let partitions = self.partition_write_map.read().unwrap();
         (*partitions)
             .values()
             .any(|map| map.iter().any(|node| *node == filter))
@@ -456,21 +456,21 @@ impl Cluster {
     }
 
     pub fn aliases(&self) -> HashMap<Host, Arc<Node>> {
-        self.aliases.read().clone()
+        self.aliases.read().unwrap().clone()
     }
 
     pub fn nodes(&self) -> Vec<Arc<Node>> {
-        self.nodes.read().clone()
+        self.nodes.read().unwrap().clone()
     }
 
     fn set_nodes(&self, new_nodes: Vec<Arc<Node>>) {
-        let mut nodes = self.nodes.write();
+        let mut nodes = self.nodes.write().unwrap();
         *nodes = new_nodes;
     }
 
     pub fn get_node(&self, partition: &Partition) -> Result<Arc<Node>> {
         let partitions = self.partitions();
-        let partitions = partitions.read();
+        let partitions = partitions.read().unwrap();
 
         if let Some(node_array) = partitions.get(partition.namespace) {
             if let Some(node) = node_array.get(partition.partition_id) {
@@ -512,7 +512,7 @@ impl Cluster {
     pub fn close(&self) -> Result<()> {
         if !self.closed.load(Ordering::Relaxed) {
             // close tend by closing the channel
-            let mut tx = self.tend_channel.lock();
+            let mut tx = self.tend_channel.lock().unwrap();
             if let Some(tx) = tx.take() {
                 let _ = tx.send(());
             }

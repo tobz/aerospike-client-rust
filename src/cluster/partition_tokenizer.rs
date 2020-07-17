@@ -18,7 +18,7 @@ use std::str;
 use std::sync::Arc;
 use std::vec::Vec;
 
-use parking_lot::RwLock;
+use std::sync::RwLock;
 use error_chain::bail;
 
 use crate::cluster::node;
@@ -55,7 +55,7 @@ impl PartitionTokenizer {
         nmap: Arc<RwLock<HashMap<String, Vec<Arc<Node>>>>>,
         node: Arc<Node>,
     ) -> Result<HashMap<String, Vec<Arc<Node>>>> {
-        let mut amap = nmap.read().clone();
+        let mut amap = nmap.read().unwrap().clone();
 
         // <ns>:<base64-encoded partition map>;<ns>:<base64-encoded partition map>; ...
         let part_str = str::from_utf8(&self.buffer)?;
