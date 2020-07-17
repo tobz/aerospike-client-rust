@@ -32,10 +32,7 @@ pub struct ConnectionPool(Pool<Connection, Error>);
 
 impl ConnectionPool {
     pub fn new(host: Host, policy: ClientPolicy) -> Self {
-        Self::with_capacity(8, host, policy)
-    }
-
-    pub fn with_capacity(capacity: usize, host: Host, policy: ClientPolicy) -> Self {
+        let capacity = policy.max_conns_per_node;
         let manager = PoolManager {
             host,
             policy,
